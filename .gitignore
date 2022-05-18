@@ -132,3 +132,12 @@ all.config
 
 # Kdevelop4
 *.kdev4
+
+debug_kernel/
+drivers/dgahci/
+drivers/leapioata/
+drivers/scsi/leapiosas/
+drivers/tty/vt/conmakehash
+drivers/video/logo/pnmtologo
+drivers/xpdma/
+git.sh
