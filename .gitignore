@@ -163,6 +163,7 @@ x509.genkey
 sphinx_*/
 
 debug_kernel/
+edk2/
 drivers/scsi/plda/
 drivers/scsi/vpcie/
 drivers/scsi/nvmevirt/
