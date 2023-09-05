@@ -161,3 +161,9 @@ x509.genkey
 
 # Documentation toolchain
 sphinx_*/
+
+debug_kernel/
+drivers/scsi/plda/
+drivers/scsi/vpcie/
+drivers/scsi/nvmevirt/
+drivers/scsi/leapiosas/
