@@ -166,5 +166,6 @@ debug_kernel/
 edk2/
 drivers/scsi/plda/
 drivers/scsi/vpcie/
+drivers/scsi/vstorage/
 drivers/scsi/nvmevirt/
 drivers/scsi/leapiosas/
