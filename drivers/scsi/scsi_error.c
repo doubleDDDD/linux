@@ -322,6 +322,35 @@ void scsi_eh_scmd_add(struct scsi_cmnd *scmd)
 	call_rcu_hurry(&scmd->rcu, scsi_eh_inc_host_failed);
 }
 
+
+/**
+ * scsi_eh_scmd_add_to_sdev - add scsi cmd to sdev.
+ * @scmd:	scmd to run eh on.
+ */
+void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
+{
+	struct Scsi_Host *shost = scmd->device->host;
+	unsigned long flags;
+	//int ret;
+
+	WARN_ON_ONCE(!shost->ehandler);
+	WARN_ON_ONCE(!test_bit(SCMD_STATE_INFLIGHT, &scmd->state));
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	if (shost->eh_deadline != -1 && !shost->last_reset)
+		shost->last_reset = jiffies;
+
+	scsi_eh_reset(scmd);
+
+	// list_add_tail(&scmd->eh_entry, &shost->eh_cmd_q);
+	// spin_unlock_irqrestore(shost->host_lock, flags);
+	// /*
+	//  * Ensure that all tasks observe the host state change before the
+	//  * host_failed change.
+	//  */
+	// call_rcu_hurry(&scmd->rcu, scsi_eh_inc_host_failed);
+}
+
 /**
  * scsi_timeout - Timeout function for normal scsi commands.
  * @req:	request that is timing out.

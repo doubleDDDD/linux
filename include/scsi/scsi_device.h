@@ -63,6 +63,25 @@ enum scsi_scan_mode {
 	SCSI_SCAN_MANUAL,
 };
 
+/******************************************/
+enum sentity_state {
+    // 前三种 sdev 专用
+    SENTITY_DEV_IDLE = 0,
+    SENTITY_DEV_FAULT,
+    SENTITY_DEV_RUNNING,
+    SENTITY_FAULT,
+    SENTITY_ANY_RUNNING,
+    SENTITY_UNCERTAIN,
+};
+
+enum post_fault_action {
+    OFFLINE_POST_FAULT = 0,
+    UPGRADE_TO_TARGET_RESET_POST_FAULT,
+    UPGRADE_TO_BUS_RESET_POST_FAULT,
+    UPGRADE_TO_HOST_RESET_POST_FAULT
+};
+/******************************************/
+
 enum scsi_device_event {
 	SDEV_EVT_MEDIA_CHANGE	= 1,	/* media has changed */
 	SDEV_EVT_INQUIRY_CHANGE_REPORTED,		/* 3F 03  UA reported */
@@ -140,6 +159,10 @@ struct scsi_device {
 	const char * vendor;		/* [back_compat] point into 'inquiry' ... */
 	const char * model;		/* ... after scan; point to static string */
 	const char * rev;		/* ... "nullnullnullnull" before scan */
+
+    /* 下面2个字段用于不依赖真正超时的情况下，评估 sdev 是否健康 */
+    unsigned long last_submit_jiffies; /* 记录最近的一次提交 */
+    unsigned long last_complete_jiffies; /* 记录最近的一次完成 */
 
 #define SCSI_DEFAULT_VPD_LEN	255	/* default SCSI VPD page size (max) */
 	struct scsi_vpd __rcu *vpd_pg0;
@@ -389,6 +412,29 @@ static inline struct scsi_target *scsi_target(struct scsi_device *sdev)
 
 #define starget_printk(prefix, starget, fmt, a...)	\
 	dev_printk(prefix, &(starget)->dev, fmt, ##a)
+
+
+struct scsi_channel {
+    /* 新增数据结构 */
+    struct Scsi_Host *host;
+	struct list_head targets; /* channel 下的所有 target */
+    int channel; /* channel id */
+    struct list_head same_host_siblings;
+
+    struct list_head schannel_eh_siblings; /* 如果 channel GG，则会挂到 host 上 */
+    atomic_t eh_schannel_state;
+    spinlock_t eh_schannel_lock;
+
+    /* 仿照 sdev 的 busy */
+    unsigned int starget_failed;
+    unsigned int total_stargets;
+
+    // reset失败后的动作
+    enum post_fault_action pfaction;
+};
+
+
+
 
 extern struct scsi_device *__scsi_add_device(struct Scsi_Host *,
 		uint, uint, u64, void *hostdata);
