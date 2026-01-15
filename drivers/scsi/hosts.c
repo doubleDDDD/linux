@@ -178,6 +178,8 @@ void scsi_remove_host(struct Scsi_Host *shost)
 
 	scsi_autopm_get_host(shost);
 	flush_workqueue(shost->tmf_work_q);
+	flush_workqueue(shost->eh_checkpoint);
+	flush_workqueue(shost->eh_process);	
 	scsi_forget_host(shost);
 	mutex_unlock(&shost->scan_mutex);
 	scsi_proc_host_rm(shost);
@@ -345,6 +347,10 @@ static void scsi_host_dev_release(struct device *dev)
 
 	if (shost->tmf_work_q)
 		destroy_workqueue(shost->tmf_work_q);
+	if (shost->eh_checkpoint)
+		destroy_workqueue(shost->eh_checkpoint);
+	if (shost->eh_process)
+		destroy_workqueue(shost->eh_process);
 	if (shost->ehandler)
 		kthread_stop(shost->ehandler);
 	if (shost->work_q)
@@ -406,6 +412,10 @@ struct Scsi_Host *scsi_host_alloc(const struct scsi_host_template *sht, int priv
 	INIT_LIST_HEAD(&shost->eh_abort_list);
 	INIT_LIST_HEAD(&shost->eh_cmd_q);
 	INIT_LIST_HEAD(&shost->starved_list);
+	INIT_LIST_HEAD(&shost->schannels);
+	INIT_LIST_HEAD(&shost->eh_sdev);
+	INIT_LIST_HEAD(&shost->eh_starget);
+	INIT_LIST_HEAD(&shost->eh_schannel);
 	init_waitqueue_head(&shost->host_wait);
 	mutex_init(&shost->scan_mutex);
 
@@ -529,6 +539,23 @@ struct Scsi_Host *scsi_host_alloc(const struct scsi_host_template *sht, int priv
 			     "failed to create tmf workq\n");
 		goto fail;
 	}
+
+	shost->eh_checkpoint = alloc_workqueue("scsi_eh_checkpoint_%d",
+					WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS,
+					   1, shost->host_no);
+	if (!shost->eh_checkpoint) {
+		shost_printk(KERN_WARNING, shost, "failed to create eh_checkpoint workq\n");
+		goto fail;
+	}
+
+	shost->eh_process = alloc_workqueue("scsi_eh_process_%d",
+					WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS,
+					   1, shost->host_no);
+	if (!shost->eh_process) {
+		shost_printk(KERN_WARNING, shost, "failed to create eh_process workq\n");
+		goto fail;
+	}
+
 	if (scsi_proc_hostdir_add(shost->hostt) < 0)
 		goto fail;
 	return shost;

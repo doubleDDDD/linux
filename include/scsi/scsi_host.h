@@ -10,6 +10,7 @@
 #include <linux/seq_file.h>
 #include <linux/blk-mq.h>
 #include <scsi/scsi.h>
+#include <scsi/scsi_device.h>
 
 struct block_device;
 struct completion;
@@ -552,6 +553,19 @@ struct Scsi_Host {
 
 	spinlock_t		default_lock;
 	spinlock_t		*host_lock;
+
+	/****************************************************/
+	struct list_head schannels; /* host 下的所有 channel */
+	struct list_head eh_sdev; /* 所有异常的sdev */
+	struct list_head eh_starget; /* 所有异常的starget */
+	struct list_head eh_schannel; /* 所有异常的schannel */
+	struct workqueue_struct *eh_checkpoint; /* checkpoint的工作队列 */
+	struct workqueue_struct *eh_process; /* checkpoint的工作队列 */
+	atomic_t eh_shost_state;
+	enum post_fault_action pfaction;
+	unsigned int schannel_failed;
+	unsigned int total_channels;
+	/****************************************************/
 
 	struct mutex		scan_mutex;/* serialize scanning activity */
 

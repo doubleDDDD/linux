@@ -300,19 +300,25 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	sdev->id = starget->id;
 	sdev->lun = lun;
 	sdev->channel = starget->channel;
+	sdev->schannel = starget->schannel;
 	mutex_init(&sdev->state_mutex);
 	sdev->sdev_state = SDEV_CREATED;
 	INIT_LIST_HEAD(&sdev->siblings);
 	INIT_LIST_HEAD(&sdev->same_target_siblings);
 	INIT_LIST_HEAD(&sdev->starved_entry);
 	INIT_LIST_HEAD(&sdev->event_list);
+	INIT_LIST_HEAD(&sdev->dev_eh_cmd_q);
+	INIT_LIST_HEAD(&sdev->sdev_eh_siblings);	
 	spin_lock_init(&sdev->list_lock);
 	mutex_init(&sdev->inquiry_mutex);
 	INIT_WORK(&sdev->event_work, scsi_evt_thread);
 	INIT_WORK(&sdev->requeue_work, scsi_requeue_run_queue);
+	INIT_DELAYED_WORK(&sdev->checkpoint_work, scsi_eh_check_point);
+	INIT_DELAYED_WORK(&sdev->eh_reset_work, scsi_eh_reset_worker);
 
 	sdev->sdev_gendev.parent = get_device(&starget->dev);
 	sdev->sdev_target = starget;
+	starget->total_sdevs++;
 
 	/* usually NULL and set by ->sdev_init instead */
 	sdev->hostdata = hostdata;
@@ -478,6 +484,37 @@ static void scsi_target_reap_ref_put(struct scsi_target *starget)
 	kref_put(&starget->reap_ref, scsi_target_reap_ref_release);
 }
 
+/* 新增 schannel 数据结构 */
+static struct scsi_channel *scsi_try_allocate_channel(struct scsi_target *starget, int channel)
+{
+	struct Scsi_Host *shost = starget->host;
+	struct scsi_channel *schannel;
+
+	list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
+		if (schannel->channel != channel)
+			continue;
+		else
+			return schannel;
+	}
+
+	schannel = kzalloc(sizeof(struct scsi_channel), GFP_KERNEL);
+	if (!schannel) {
+		printk(KERN_ERR "%s: allocation failure\n", __func__);
+		return NULL;
+	}
+	pr_err("%s host%d allocate schannel %d success!", __func__, shost->host_no, channel);
+	schannel->host = shost;
+	schannel->channel = channel;
+	INIT_LIST_HEAD(&schannel->targets);
+	INIT_LIST_HEAD(&schannel->same_host_siblings);
+	INIT_LIST_HEAD(&schannel->schannel_eh_siblings);
+	list_add_tail(&schannel->same_host_siblings, &shost->schannels);
+	shost->total_channels++;
+	pr_err("%s host%d total_channels now is %d!", __func__, shost->host_no, shost->total_channels);
+
+	return schannel;
+}
+
 /**
  * scsi_alloc_target - allocate a new or find an existing target
  * @parent:	parent of the target (need not be a scsi host)
@@ -500,6 +537,7 @@ static struct scsi_target *scsi_alloc_target(struct device *parent,
 		+ shost->transportt->target_size;
 	struct scsi_target *starget;
 	struct scsi_target *found_target;
+	struct scsi_channel *schannel;
 	int error, ref_got;
 
 	starget = kzalloc(size, GFP_KERNEL);
@@ -520,9 +558,12 @@ static struct scsi_target *scsi_alloc_target(struct device *parent,
 	starget->can_queue = 0;
 	INIT_LIST_HEAD(&starget->siblings);
 	INIT_LIST_HEAD(&starget->devices);
+	INIT_LIST_HEAD(&starget->same_channel_siblings);
+	INIT_LIST_HEAD(&starget->starget_eh_siblings);
 	starget->state = STARGET_CREATED;
 	starget->scsi_level = SCSI_2;
 	starget->max_target_blocked = SCSI_DEFAULT_TARGET_BLOCKED;
+	starget->host = shost;
  retry:
 	spin_lock_irqsave(shost->host_lock, flags);
 
@@ -547,6 +588,13 @@ static struct scsi_target *scsi_alloc_target(struct device *parent,
 		}
 	}
 	get_device(dev);
+
+	schannel = scsi_try_allocate_channel(starget, channel);
+	starget->schannel = schannel;
+	list_add_tail(&starget->same_channel_siblings, &schannel->targets);
+	schannel->total_stargets++;
+	pr_err("%s host%d channel%d total_stargets now is %d!\n",
+		   __func__, shost->host_no, schannel->channel, schannel->total_stargets);
 
 	return starget;
 

@@ -93,6 +93,8 @@ extern enum scsi_disposition scsi_decide_disposition(struct scsi_cmnd *cmd);
 extern void scsi_eh_wakeup(struct Scsi_Host *shost, unsigned int busy);
 extern void scsi_eh_scmd_add(struct scsi_cmnd *);
 extern void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *);
+extern void scsi_eh_check_point(struct work_struct *work);
+extern void scsi_eh_reset_worker(struct work_struct *work);
 void scsi_eh_ready_devs(struct Scsi_Host *shost,
 			struct list_head *work_q,
 			struct list_head *done_q);

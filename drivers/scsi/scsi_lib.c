@@ -1541,6 +1541,7 @@ static void scsi_complete(struct request *rq)
 		disposition = SUCCESS;
 
 	scsi_log_completion(cmd, disposition);
+	cmd->device->last_complete_jiffies = jiffies;
 
 	switch (disposition) {
 	case SUCCESS:
@@ -1553,7 +1554,8 @@ static void scsi_complete(struct request *rq)
 		scsi_queue_insert(cmd, SCSI_MLQUEUE_DEVICE_BUSY);
 		break;
 	default:
-		scsi_eh_scmd_add(cmd);
+		// scsi_eh_scmd_add(cmd);
+		scsi_eh_scmd_add_to_sdev(cmd);
 		break;
 	}
 }
@@ -1568,6 +1570,7 @@ static void scsi_complete(struct request *rq)
 static int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 {
 	struct Scsi_Host *host = cmd->device->host;
+	struct scsi_device *sdev = cmd->device;
 	int rtn = 0;
 
 	atomic_inc(&cmd->device->iorequest_cnt);
@@ -1624,6 +1627,7 @@ static int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 
 	trace_scsi_dispatch_cmd_start(cmd);
 	rtn = host->hostt->queuecommand(host, cmd);
+	sdev->last_submit_jiffies = jiffies;
 	if (rtn) {
 		atomic_dec(&cmd->device->iorequest_cnt);
 		trace_scsi_dispatch_cmd_error(cmd, rtn);

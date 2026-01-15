@@ -215,7 +215,8 @@ out:
 	list_del_init(&scmd->eh_entry);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
-	scsi_eh_scmd_add(scmd);
+	// scsi_eh_scmd_add(scmd);
+	scsi_eh_scmd_add_to_sdev(scmd);
 }
 
 /**
@@ -323,6 +324,955 @@ void scsi_eh_scmd_add(struct scsi_cmnd *scmd)
 }
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+static inline bool eh_scsi_device_is_busy(struct scsi_device *sdev)
+{
+	if (scsi_device_busy(sdev) >= sdev->queue_depth)
+		return true;
+	if (atomic_read(&sdev->device_blocked) > 0)
+		return true;
+	return false;
+}
+
+#define FP_SUBMIT_WINDOW      (HZ / 5)   /* 200ms */
+#define FP_COMPLETE_TIMEOUT   (2 * HZ)   /* 2s */
+
+/* 
+ * 该函数能够断定 sdev 有 I/O 且异常
+ * 返回 true 说明 sdev 无法继续向前推进了
+ */
+static bool sdev_forward_progress_lost(struct scsi_device *sdev)
+{
+	int inflight;
+	inflight = scsi_device_busy(sdev);
+	if (inflight == 0)
+		return false;
+
+	if (!eh_scsi_device_is_busy(sdev) && time_after(jiffies, sdev->last_submit_jiffies + FP_SUBMIT_WINDOW))
+		return false;
+
+	if (time_after(jiffies, sdev->last_complete_jiffies + FP_COMPLETE_TIMEOUT))
+		return true;   /* forward progress lost */
+
+	return false;
+}
+
+/* 指定 sdev 是否健康，这个是最底层的检查方式，而且结果是确定性的，只是需要继续证明 */
+static enum sentity_state sdev_is_healthy(struct scsi_device *sdev)
+{
+	/* 1. 优先检查状态。如果状态已经改变了，那 GG 了；但是该状态无法检查正在 GG 的 sdev，所以就有了下面的步骤 */
+	if (!atomic_read(&sdev->eh_sdev_state))
+		return SENTITY_DEV_FAULT; /* GG */
+
+	/* 2. 再检查是否有活跃的 I/O */
+    	if (!scsi_device_busy(sdev))
+        	return SENTITY_DEV_IDLE; /* idle */
+
+	/* 3. 根据之前埋下的钩子判断是否有I/O正常返回 */
+	if (sdev_forward_progress_lost(sdev))
+		return SENTITY_DEV_FAULT; /* GG */
+
+	/* 一切无碍后返回正常运行 */
+	return SENTITY_DEV_RUNNING; /* running */
+}
+
+/* 
+ * 指定 target 是否健康，遍历 sdev 调用 sdev 是否健康的方法
+ * 这里第一次 involve 遍历操作
+ * 其实只有这几种可能性（不考虑 sdev 的热拔插，即不考虑 starget->devices 的新增），我期待的返回状态
+ * 只需要返回2个状态足矣（主要是2个状态）
+ */
+static enum sentity_state target_is_healthy(struct scsi_target *starget)
+{
+	struct scsi_device *sdev;
+
+	/* 1. 先检查 EH 相关的状态；如果状态已经 GG 了，那就 GG；如果该 target 还在 GG 的路上，就依赖下面 */
+	if (!atomic_read(&starget->eh_starget_state))
+		return SENTITY_FAULT;
+
+	/* 2. 再通过遍历的方式确定漏网之鱼 */
+	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
+		if (sdev_is_healthy(sdev))
+			return SENTITY_ANY_RUNNING;
+	}
+
+	return SENTITY_UNCERTAIN;
+}
+
+/* 
+ * 指定 channel 是否正常，遍历 channel 下有无正常的 target，实际操作要遍历 host 下的所有 sdev
+ * 引入了 2 重遍历，考虑该方式与直接遍历 host，判断 target id 的方式哪个更好
+ */
+static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
+{
+	struct scsi_target *starget;
+
+	if (!atomic_read(&schannel->eh_schannel_state))
+		return SENTITY_FAULT;
+
+	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) {
+		if (target_is_healthy(starget))
+			return SENTITY_ANY_RUNNING;
+	}
+
+	return SENTITY_UNCERTAIN;
+}
+
+/*
+ * 判断 host 是否有异常的 channel
+ * 引入了 3 重遍历
+ */
+static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
+{
+	struct scsi_channel *schannel;
+
+	if (!atomic_read(&shost->eh_shost_state))
+		return SENTITY_FAULT;
+
+	if (scsi_host_in_recovery(shost))
+		return SENTITY_FAULT;
+
+	list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
+		if (channel_is_healthy(schannel))
+			return SENTITY_ANY_RUNNING;
+	}
+
+	return SENTITY_UNCERTAIN;
+}
+
+static bool eh_scan_target_firstly(struct scsi_target *starget)
+{
+	struct scsi_device *sdev;
+	struct scsi_channel *schannel = starget->schannel;
+	bool need_wait = false;
+
+	/* 
+	* 遍历全部 sdev
+	*  1. 将其从 host 上拿下来，因为目前错误处理粒度是 target
+	*  2. 阻塞所有 sdev 的 I/O
+	*/
+	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
+		if (sdev->eh_queued == true)
+			list_del_init(&sdev->sdev_eh_siblings);
+
+		if (atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED)
+			continue;
+
+		if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL)
+			atomic_set(&sdev->eh_sdev_state, EH_QUIESCE);
+
+		mutex_lock(&sdev->state_mutex);
+		scsi_device_set_state(sdev, SDEV_BLOCK);
+		mutex_unlock(&sdev->state_mutex);
+
+		if (scsi_device_busy(sdev) == sdev->scmd_failed) {
+			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+			starget->sdev_failed++;
+		} else {
+			need_wait = true;
+		}
+	}
+
+	/* 保证调用该函数之前，target 一定已经出于 EH_QUIESCE 状态 */
+	if (starget->total_sdevs == starget->sdev_failed && (atomic_read(&starget->eh_starget_state) == EH_QUIESCE)) {
+		/* 当 target 下面所有的 sdev 都 GG 的时候，target也应该迭代到 EH_SCHEDULED */
+		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
+		// channel 的 target failed++
+		schannel->starget_failed++; /* 但是这里无法保证 channel 处于 EH_QUIESCE，所以无动作 */
+	}
+
+	return need_wait;
+}
+
+static bool eh_scan_target_no_firstly(struct scsi_target *starget)
+{
+	struct scsi_device *sdev;
+	struct scsi_channel *schannel = starget->schannel;
+	bool need_wait = false;
+
+	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
+		if (atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED)
+			continue;
+
+		if (scsi_device_busy(sdev) == sdev->scmd_failed) {
+			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+			starget->sdev_failed++;
+		} else {
+			need_wait = true;
+		}
+	}
+
+	/* 保证调用该函数之前，target 一定已经出于 EH_QUIESCE 状态 */
+	if (starget->total_sdevs == starget->sdev_failed && (atomic_read(&starget->eh_starget_state) == EH_QUIESCE)) {
+		/* 当 target 下面所有的 sdev 都 GG 的时候，target也应该迭代到 EH_SCHEDULED */
+		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
+		// channel 的 target failed++
+		schannel->starget_failed++; /* 但是这里无法保证 channel 处于 EH_QUIESCE，所以无动作 */
+	}
+
+	return need_wait;
+}
+
+/*
+ * 时间复杂度是 O(N)，调用位置均为 check point
+ * 1. 能跑到这里来，就说明无论如何，得要冻结 target，但是冻结的过程本身是需要时间的（等待正常 I/O 的返回，这是同步的方式，是否能换成异步的形式呢呢？）
+ *  1. 如果需要等待，则直接退出工作队列；满足条件再触发 checkpoint 的执行
+ * 2. 调用该函数的原因是
+ *  1. target 没有 running 的 I/O，无法判断健康状况，可以直接 reset，所以就来尝试 target reset
+ *  2. host 没有 sdev 对应的 reset 方法，一有点风吹草动，就需要升级到 target reset
+ * 3. 考虑一下返回值，无非就是 done 和need wait
+ *  1. DONE，可以继续向下执行
+ *  2. NEED_WAIT_IO_DONE，直接 return，结束这个work，等待满足条件后重新入队
+ * 4. 这里可能会多次进入，所以 target 本身是需要状态来维护的，target 本身需要状态机
+ * 5. 主要逻辑：
+ *  1. 如果还有新的 I/O 在ing，则首先阻止新 I/O 的下发
+ *  2. 如果需要等待 I/O 完成或超时，则直接返回 NEED_WAIT_IO_DONE
+ *   1. 如果是等待超时的话，迟早都会调用到
+ *   2. 如果是正常 I/O 完成的话，该如何触发呢？
+ *    1. 假设 target 有 3 个 sdev A，B，C，D (IDLE)；A 挂了之后，且 A 功德圆满 GG 后，我来尝试升级到 target reset
+ *    2. 正常来讲，B，C 的 I/O 结束后是不会触发到 checkpoint 的，这里应该如何触发？
+ *    3. 第一次进入后会判断 if (busy == failed)
+ * 6. 谁会调用 update_eh_field_to_target
+ *  1. 只有 checkpoint 会发起调用
+ *  2. 目的是将 target 冻结。状态什么的都改掉
+ *  3. 进入的时候可能会面临多种可能性
+ *   1. 除了异常的 sdev，压根没有其它 sdev
+ *    1. 先把 target 状态变了，再把 target 挂入到 host 的异常 list
+ *    2. 遍历 sdev，只有这一个
+ *    3. 最后能够返回 DONE，直接就把 eh 拉起来了
+ *   2. 除了异常的 sdev，其它 sdev 都在IDEL
+ *    1. 先把 target 状态变了，再把 target 挂入到 host 的异常 list
+ *    2. 遍历 sdev，遍历到这个异常的直接continue掉了；遍历到 IDLE 的，直接修改这个 IDLE 设备的状态且 starget->sdev_failed++;
+ *    3. 最后能够返回 DONE，直接就把 eh 拉起来了
+ *   3. 除了异常的 sdev，其它 sdev 也在 GG 的路上
+ *    1. 这种最后返回 NEED_WAIT_IO_DONE，等待 sdev 真的 GG 了
+ *   4. 除了异常的 sdev，其它 sdev 都在正常 I/O
+ *    1. 先把他的 I/O 停了
+ *    2. 返回 NEED_WAIT_IO_DONE，这个 worker 的使命就结束了
+ *     1. 好，问题来了。这个 I/O 完成后，怎么再把这个 checkpoint 拉起来，就现状来看，是没有机制把他拉起来的。目前看起来是自己把自己再次入队是最方便的，定时 check
+ *   5. 除了异常的 sdev，其它 sdev 涵盖 2/3/4 的可能性
+ *    1. 以最难得为准，在该例中，就需要定时重新入队来检查
+ * 7. 统一一下，只要是返回了 need wait，就都自己重新入队自己   
+ */
+static enum eh_update_result update_eh_field_to_target(struct scsi_target *starget)
+{
+	struct Scsi_Host *shost = starget->host;
+	struct scsi_channel *schannel = starget->schannel;
+	bool need_wait = false;
+
+	if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED || atomic_read(&starget->eh_starget_state) == EH_RUNNING) // 可以直接升级到 target，如果已经running了，reset 线程自然会拦截
+		return DONE;
+
+	if (atomic_read(&starget->eh_starget_state) == EH_NORMAL) { // 第一次进入
+		atomic_set(&starget->eh_starget_state, EH_QUIESCE); // 修改 target 状态
+		list_add_tail(&starget->starget_eh_siblings, &shost->eh_starget); // 将该 target 挂到 host 上
+		starget->eh_queued = true;
+		need_wait = eh_scan_target_firstly(starget);
+	} else { // 并非第一次进入，即 atomic_read(&starget->eh_starget_state) == EH_QUIESCE，说明之前来过，但是 eh_to_target done 的条件不满足
+		need_wait = eh_scan_target_no_firstly(starget);
+	}
+
+	if (starget->total_sdevs == starget->sdev_failed && (atomic_read(&starget->eh_starget_state) == EH_QUIESCE)) {
+		/* 当 target 下面所有的 sdev 都 GG 的时候，target也应该迭代到 EH_SCHEDULED */
+		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
+		// channel 的 target failed++
+		schannel->starget_failed++;
+	}
+
+	if (need_wait)
+		return NEED_WAIT_IO_DONE;
+	else
+		return DONE;
+}
+
+static bool eh_scan_channel_firstly(struct scsi_channel *schannel)
+{
+	struct scsi_target *starget;
+	struct Scsi_Host *shost = schannel->host;
+	bool need_wait = false;
+
+	/* 
+	* 遍历全部 target
+	*  1. 将其从 host 上拿下来，因为目前错误处理粒度是 channel
+	*  2. 阻塞所有 target 下所有 sdev 的 I/O
+	*/
+	// 遍历channel下的所有target，再遍历target下的全部 sdev，TODO 这个开销看着有点难受哦，一直在遍历
+	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) { // 遍历 channel 下的 target
+		if (starget->eh_queued == true)
+			list_del_init(&starget->starget_eh_siblings);
+
+		if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED)
+			continue;
+
+		if (atomic_read(&starget->eh_starget_state) == EH_NORMAL)
+			atomic_set(&starget->eh_starget_state, EH_QUIESCE);
+
+		if (eh_scan_target_firstly(starget))
+			need_wait = true;
+	}
+
+	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
+		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
+		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
+		// host 的 host failed++
+		shost->schannel_failed++;
+	}
+
+	return need_wait;
+}
+
+static bool eh_scan_channel_no_firstly(struct scsi_channel *schannel)
+{
+	struct scsi_target *starget;
+	struct Scsi_Host *shost = schannel->host;
+	bool need_wait = false;
+
+	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) {
+		if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED)
+			continue;
+
+		if (eh_scan_target_no_firstly(starget))
+			need_wait = true;
+	}
+
+	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
+		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
+		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
+		// host 的 host failed++
+		shost->schannel_failed++;
+	}
+
+	return need_wait;
+}
+
+/*
+ * 调用位置均位于 check point，参考 update_eh_field_to_target
+ */
+static enum eh_update_result update_eh_field_to_channel(struct scsi_channel *schannel)
+{
+	struct Scsi_Host *shost = schannel->host;
+	bool need_wait = false;
+
+	if (atomic_read(&schannel->eh_schannel_state) == EH_SCHEDULED || atomic_read(&schannel->eh_schannel_state) == EH_RUNNING)
+		return DONE;
+
+	if (atomic_read(&schannel->eh_schannel_state) == EH_NORMAL) {
+		atomic_set(&schannel->eh_schannel_state, EH_QUIESCE); // 修改 channel 状态
+		list_add_tail(&schannel->schannel_eh_siblings, &shost->eh_schannel); // 将该 channel 挂到 host 上
+		schannel->eh_queued = true;
+		need_wait = eh_scan_channel_firstly(schannel);
+	} else { // 并非第一次进入，即 atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE
+		need_wait = eh_scan_channel_no_firstly(schannel);
+	}
+
+	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
+		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
+		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
+		// host 的 host failed++
+		shost->schannel_failed++;
+	}
+
+	if (need_wait)
+		return NEED_WAIT_IO_DONE;
+	else
+		return DONE;
+}
+
+/*
+ * 调用位置均位于 check point，参考 update_eh_field_to_target
+ */
+static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
+{
+	struct scsi_channel *schannel;
+	bool need_wait = false;
+
+	if (atomic_read(&shost->eh_shost_state) == EH_SCHEDULED || atomic_read(&shost->eh_shost_state) == EH_RUNNING)
+		return DONE;
+
+	/* 先阻塞 host */
+	scsi_host_set_state(shost, SHOST_RECOVERY);
+	if (atomic_read(&shost->eh_shost_state) == EH_NORMAL) {
+		atomic_set(&shost->eh_shost_state, EH_QUIESCE);
+		// eh 域 是否在 host 优先直接看状态，不需要 check 挂了多少
+
+		// 遍历 host 下所有的channel，遍历channel下的全部target，遍历target下的全部sdev，TODO 这个开销看着有点难受哦，一直在遍历，其实这里可以直接遍历所有的 sdev，待优化项
+		list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
+			if (schannel->eh_queued == true)
+				list_del_init(&schannel->schannel_eh_siblings);
+
+			if (atomic_read(&schannel->eh_schannel_state) == EH_SCHEDULED)
+				continue;
+
+			if (atomic_read(&schannel->eh_schannel_state) == EH_NORMAL)
+				atomic_set(&schannel->eh_schannel_state, EH_QUIESCE);
+
+			if (eh_scan_channel_firstly(schannel))
+				need_wait = true;
+		}
+	} else {
+		// 遍历 host 下所有的channel，遍历channel下的全部target，遍历target下的全部sdev，TODO 这个开销看着有点难受哦，一直在遍历，其实这里可以直接遍历所有的 sdev，待优化项
+		list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
+			if (atomic_read(&schannel->eh_schannel_state) == EH_SCHEDULED)
+				continue;
+
+			if (eh_scan_channel_no_firstly(schannel))
+				need_wait = true;
+		}
+	}
+
+	if (shost->total_channels == shost->schannel_failed) // 当 host 下面所有的 channel 都 EH_SCHEDULED 的时候，host 也应该迭代到 EH_SCHEDULED
+		atomic_set(&shost->eh_shost_state, EH_SCHEDULED);
+
+	if (need_wait)
+		return NEED_WAIT_IO_DONE;
+	else
+		return DONE;
+}
+
+/* 关键 debug 函数 */
+static inline const char *scsi_eh_state_name(enum scsi_eh_state state)
+{
+	switch (state) {
+	case EH_NORMAL: return "EH_NORMAL";
+	case EH_QUIESCE: return "EH_QUIESCE";
+	case EH_SCHEDULED: return "EH_SCHEDULED";
+	case EH_RUNNING: return "EH_RUNNING";
+	default: return "EH_UNKNOWN";
+	}
+}
+
+static inline const char *post_fault_action_name(enum post_fault_action pfaction)
+{
+	switch (pfaction) {
+	case OFFLINE_POST_FAULT: return "OFFLINE_POST_FAULT";
+	case UPGRADE_TO_TARGET_RESET_POST_FAULT: return "UPGRADE_TO_TARGET_RESET_POST_FAULT";
+	case UPGRADE_TO_BUS_RESET_POST_FAULT: return "UPGRADE_TO_BUS_RESET_POST_FAULT";
+	case UPGRADE_TO_HOST_RESET_POST_FAULT: return "UPGRADE_TO_HOST_RESET_POST_FAULT";
+	default: return "EH_UNKNOWN";
+	}
+}
+
+static inline const char *scsi_eh_reset_level_name(enum scsi_eh_reset_level level)
+{
+	switch (level) {
+	case EH_SDEV: return "EH_SDEV";
+	case EH_STARGET: return "EH_STARGET";
+	case EH_SCHANNEL: return "EH_SCHANNEL";
+	case EH_SHOST: return "EH_SHOST";
+	default: return "EH_UNKNOWN";
+	}
+}
+
+static inline const char *scsi_eh_state_name(enum scsi_eh_state state);
+static inline const char *post_fault_action_name(enum post_fault_action pfaction);
+static inline const char *scsi_eh_reset_level_name(enum scsi_eh_reset_level level);
+
+static void eh_host_statue_show(struct scsi_device *sdev)
+{
+	struct Scsi_Host *shost = sdev->host;
+	struct scsi_target *starget = sdev->sdev_target;
+	struct scsi_channel *schannel = sdev->schannel;
+
+	pr_err("\n");
+	pr_err("%s: sdev scmd_failed        =%d, sdev scsi_device_busy   =%d\n",
+		 __func__, sdev->scmd_failed, scsi_device_busy(sdev));
+	pr_err("%s: starget sdev_failed     =%d, starget total_sdevs     =%d\n",
+		 __func__, starget->sdev_failed, starget->total_sdevs);
+	pr_err("%s: schannel starget_failed =%d, schannel total_stargets =%d\n",
+		 __func__, schannel->starget_failed, schannel->total_stargets);
+	pr_err("%s: shost schannel_failed   =%d, shost total_channels    =%d\n",
+		 __func__, shost->schannel_failed, shost->total_channels);
+	pr_err("\n");
+	pr_err("%s: sdev eh state     =%s, sdev pfaction     =%s\n",
+		 __func__, scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)), post_fault_action_name(sdev->pfaction));
+	pr_err("%s: starget eh state  =%s, starget pfaction  =%s\n",
+		 __func__, scsi_eh_state_name(atomic_read(&starget->eh_starget_state)), post_fault_action_name(starget->pfaction));
+	pr_err("%s: schannel eh state =%s, schannel pfaction =%s\n",
+		 __func__, scsi_eh_state_name(atomic_read(&schannel->eh_schannel_state)), post_fault_action_name(schannel->pfaction));
+	pr_err("%s: shost eh state    =%s, shost pfaction    =%s\n",
+		 __func__, scsi_eh_state_name(atomic_read(&shost->eh_shost_state)), post_fault_action_name(shost->pfaction));
+	pr_err("\n");
+	pr_err("%s: sdev eh_queued     =%d\n",
+		 __func__, sdev->eh_queued);
+	pr_err("%s: starget eh_queued  =%d\n",
+		 __func__, starget->eh_queued);
+	pr_err("%s: schannel eh_queued =%d\n",
+		 __func__, schannel->eh_queued);
+	pr_err("\n");
+	pr_err("\n");
+	pr_err("\n");
+	pr_err("\n");
+
+	return;
+}
+
+/* 最关键的 checkpoint */
+void scsi_eh_check_point(struct work_struct *work)
+{
+	struct scsi_device *sdev = container_of(work, struct scsi_device, checkpoint_work.work);
+	struct Scsi_Host *shost = sdev->host;
+	struct scsi_target *starget = sdev->sdev_target;
+	struct scsi_channel *schannel = sdev->schannel;
+	const struct scsi_host_template *hostt = shost->hostt;
+
+	pr_err("%s check_point wakeup!\n", __func__);
+	/* 底层驱动实现 handler 的可能性不同，这里需要评估策略，最简单的就是一个大case，根据底层不同的实现先分开 */
+	if ((hostt->eh_device_reset_handler) && (!hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 sdev**），do sdev reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target。
+		*  && 此时只能尝试 do sdev reset，失败离线即可，成功完事大吉。
+		*  && 实际上无论返回什么，都仅能够 do sdev reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		// 讨论 target 是否健康没有意义，只能执行 sdev reset，成功万事大吉，失败直接离线
+		pr_err("%s Implement eh_device_reset_handler\n", __func__);
+		sdev->pfaction = OFFLINE_POST_FAULT; // 其实是这一刻的现状
+		sdev->eh_reset_level = EH_SDEV;
+		queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+	} else if ((hostt->eh_target_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 只要有异常 sdev，直接阻塞对应 target（**这个是host的选择没有办法**），异常 sdev 所在的 target 功德圆满后 GG 后；判断其所属 channel 是否健康：
+		*   1. SENTITY_ANY_RUNNING（**明确错误范围仅在 starget**），do target reset，失败离线即可，成功万事大吉；
+		*   2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel。
+		*   && 此时只能尝试 do target reset，失败离线即可，成功万事大吉。
+		*   && 实际上无论返回什么，都仅能够 do target reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		// 讨论 channel 是否健康没有意义，只能执行 starget reset，成功万事大吉，失败直接离线
+		pr_err("%s Implement eh_target_reset_handler\n", __func__);
+		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			starget->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_STARGET;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		}
+	} else if ((hostt->eh_bus_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_target_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 只要有异常 sdev，直接阻塞对应 channel（**这个是host的选择没有办法**）。异常 sdev 所在的 channel 功德圆满 GG 后，判断其所属 host 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 schannel**），do bus reset；
+		*  2. 其它（**无法明确错误范围仅在 schannel**），但是可以无代价阻塞 host。
+		*  && 此时只能尝试 do bus reset，失败离线即可，成功万事大吉。 
+		*  && 实际上无论返回什么，都仅能够 do host reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		// 讨论 host 是否健康没有意义，只能执行 schannel reset，成功万事大吉，失败直接离线
+		pr_err("%s Implement eh_bus_reset_handler\n", __func__);
+		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			schannel->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SCHANNEL;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		}
+	} else if ((hostt->eh_host_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler)) {
+		/* ::: 只要有异常 sdev，直接阻塞整个 Host（**这个是host的选择没有办法**），异常 host 功德圆满 GG 后，直接执行 host reset，无需考虑任何返回值等 */
+		pr_err("%s Implement eh_host_reset_handler\n", __func__);
+		if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			shost->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SHOST;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_target_reset_handler) && (!hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 sdev**），do sdev reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，异常 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*     1. SENTITY_ANY_RUNNING（**明确错误范围在 starget**），do target reset，失败离线，成功万事大吉；
+		*     2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel。&& 此时只能尝试 do target reset，失败离线即可。
+		*     && 实际上无论返回什么，都仅能够 do target reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler\n", __func__);
+		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+			sdev->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SDEV;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		} else {
+			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				starget->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_STARGET;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_bus_reset_handler) && (!hostt->eh_target_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 sdev**），do sdev reset，失败离线，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，但是 target reset 未实现，只能退而求其次，先 do sdev reset（**仅 sdev GG 的可能性是存在的**），如果成功，万事大吉。如果失败，则明确至少是 target 异常。
+		*  所以第一阶段无论返回什么，都需要执行 sdev reset，无非是有可能直接离线设备，有可能需要继续升级
+		*  **开始统一逻辑**，target 异常，直接阻塞对应的 bus（**可以理解为 Host 的选择或暗示**）。bus 功德圆满 GG 后，判断其所属 host 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。&& 此时只能尝试 do bus reset，失败离线即可。&& 实际上无论返回什么，都仅能够 do bu reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler\n", __func__);
+		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
+			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				schannel->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SCHANNEL;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		} else {
+			if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+				sdev->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				sdev->pfaction = UPGRADE_TO_BUS_RESET_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 sdev**），do sdev reset，失败离线，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，但是 target reset 未实现，只能退而求其次，先 do sdev reset（**仅 sdev GG 的可能性是存在的**），如果成功，完事大吉。如果失败，则明确至少是 target 异常。
+		*  **开始统一逻辑**，target异常，仅有 host reset 方法，直接阻塞 host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_host_reset_handler\n", __func__);
+		if (sdev->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
+			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				shost->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SHOST;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		} else {
+			if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+				sdev->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				sdev->pfaction = UPGRADE_TO_HOST_RESET_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		}
+	} else if ((hostt->eh_target_reset_handler && hostt->eh_bus_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，直接阻塞对应的 target（**这个是host的选择没有办法**），异常 sdev 所在的 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 starget**），do target reset，失败离线即可，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞其对应的 channel，这种情况下可以认为 channel 异常，channel 功德圆满 GG 后，判断其所属 Host 是否健康：
+		*   1. SENTITY_ANY_RUNNING（**明确错误范围在 schannel**），do bus reset，失败离线，成功万事大吉；
+		*   2. 其它（**无法明确错误范围仅在 schannel**），但是可以无代价阻塞 host。
+		*  && 此时只能尝试 do bus reset，失败离线即可。 
+		*  && 实际上无论返回什么，都仅能够 do bus reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
+		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+				starget->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_STARGET;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				} else {
+					schannel->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_SCHANNEL;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				}
+			}
+		}
+	} else if ((hostt->eh_target_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_bus_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，直接阻塞对应 target（**这个是host的选择没有办法**），异常 sdev 所在的 target 功德圆满后 GG 后；判断其所属 channel 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 starget**），do target reset，失败离线即可，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel,这种情况下认为 channel 异常，但是 bus reset 未实现，只能退而求其次，先 do target reset（**仅 target GG 的可能性是存在的**），如果成功，万事大吉，。如果失败，则明确至少是 bus 异常。
+		*  **开始统一逻辑**，channel 异常，仅有host reset 方法，直接阻塞 Host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线 
+		*/
+		pr_err("%s Implement eh_target_reset_handler, eh_host_reset_handler\n", __func__);
+		if (starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
+			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				shost->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SHOST;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+			} else {
+			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+					starget->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_STARGET;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				} else {
+					starget->pfaction = UPGRADE_TO_HOST_RESET_POST_FAULT;
+					sdev->eh_reset_level = EH_STARGET;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				}
+			}
+		}
+	} else if ((hostt->eh_bus_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_target_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，直接阻塞对应 bus（**这个是host的选择没有办法**），异常 sdev 所在的 bus 功德圆满后 GG 后；判断其所属 host 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 bus**），do bus reset，失败离线即可，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host，这种情况下认为 channel 异常，直接执行 host reset，失败离线，成功万事大吉
+		*/
+		pr_err("%s Implement eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
+				schannel->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SCHANNEL;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				} else {
+					shost->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_SHOST;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				}
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_target_reset_handler && hostt->eh_bus_reset_handler) && (!hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 sdev**），do sdev reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，异常 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*     1. SENTITY_ANY_RUNNING（**明确错误范围在 starget**），do target reset，失败离线，成功万事大吉；
+		*     2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel，这种情况下认为 channel 异常，异常 channel 功德圆满 GG 后；判断其所属 Host 是否健康：
+		*         1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉；
+		*         2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。&& 此时只能尝试 do bus reset，失败离线即可。
+		*         && 实际上无论返回什么，都仅能够 do bus reset，其实压根没有判断的必要（当然这个取决于代码的写法）
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
+		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+			sdev->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SDEV;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		} else {
+			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+					starget->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_STARGET;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				} else {
+					if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					} else {
+						schannel->pfaction = OFFLINE_POST_FAULT;
+						sdev->eh_reset_level = EH_SCHANNEL;
+						queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+					}
+				}
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_target_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_bus_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 sdev**），do sdev reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，异常 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*     1. SENTITY_ANY_RUNNING（**明确错误范围在 starget**），do target reset，失败离线，成功万事大吉；
+		*     2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel，这种情况下认为 channel 异常，但是 bus reset 未实现，只能退而求其次，先 do bus reset（**仅 channel GG 的可能性是存在的**），如果成功，万事大吉。如果失败，则明确至少是 channel 异常。
+		*     **开始统一逻辑**，channel 异常，仅有 host reset 方法，直接阻塞 host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线 
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_host_reset_handler!\n", __func__);
+		// eh_host_statue_show(sdev);
+		if (starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
+			pr_err("%s starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT, update to host!\n", __func__);
+			// eh_host_statue_show(sdev);
+			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+				pr_err("%s need wait update to host done!\n", __func__);
+				// eh_host_statue_show(sdev);
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				pr_err("%s no need wait update to host done!\n", __func__);
+				// eh_host_statue_show(sdev);
+				shost->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SHOST;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		} else {
+			pr_err("%s starget->pfaction != UPGRADE_TO_HOST_RESET_POST_FAULT!\n", __func__);
+			// eh_host_statue_show(sdev);
+			if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+				pr_err("%s target is healthy!\n", __func__);
+				// eh_host_statue_show(sdev);
+				sdev->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				pr_err("%s no way to confirm target is healthy, update eh to target!\n", __func__);
+				// eh_host_statue_show(sdev);
+				if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+					pr_err("%s need wait update to target done!\n", __func__);
+					// eh_host_statue_show(sdev);
+					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				} else {
+					pr_err("%s no need wait update to target done!\n", __func__);
+					// eh_host_statue_show(sdev);
+					if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+						pr_err("%s channel is healthy!\n", __func__);
+						// eh_host_statue_show(sdev);
+						starget->pfaction = OFFLINE_POST_FAULT;
+						sdev->eh_reset_level = EH_STARGET;
+						queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+					} else {
+						pr_err("%s no way to confirm channel is healthy, reset firstly, if failure, reset host again!\n", __func__);
+						// eh_host_statue_show(sdev);
+						starget->pfaction = UPGRADE_TO_HOST_RESET_POST_FAULT;
+						sdev->eh_reset_level = EH_STARGET;
+						queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+					}
+				}
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_bus_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_target_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 sdev**），do sdev reset，失败离线，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，但是 target reset 未实现，只能退而求其次，先 do sdev reset（**仅 sdev GG 的可能性是存在的**），如果成功，万事大吉。如果失败，则明确至少是 target 异常。
+		*  **开始统一逻辑**，target 异常，直接阻塞对应的 bus（**可以理解为 Host 的选择或暗示**）。bus 功德圆满 GG 后，判断其所属 host 是否健康：
+		*      1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉; 
+		*      2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
+			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
+					schannel->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_SCHANNEL;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				} else {
+					if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					} else {
+						shost->pfaction = OFFLINE_POST_FAULT;
+						sdev->eh_reset_level = EH_SHOST;
+						queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+					}
+				}
+			}
+		} else {
+			if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
+				sdev->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				sdev->pfaction = UPGRADE_TO_BUS_RESET_POST_FAULT;
+				sdev->eh_reset_level = EH_SDEV;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			}
+		}
+	} else if ((hostt->eh_target_reset_handler && hostt->eh_bus_reset_handler && hostt->eh_host_reset_handler) && (!hostt->eh_device_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，直接阻塞对应的 target（**这个是host的选择没有办法**），异常 sdev 所在的 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 starget**），do target reset，失败离线即可，成功万事大吉；
+		*  2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞其对应的 channel，这种情况下可以认为 channel 异常，channel 功德圆满 GG 后，判断其所属 Host 是否健康：
+		*      1. SENTITY_ANY_RUNNING（**明确错误范围在 schannel**），do bus reset，失败离线，成功万事大吉；
+		*      2. 其它（**无法明确错误范围仅在 schannel**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
+		*/
+		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		} else {
+			if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+				starget->pfaction = OFFLINE_POST_FAULT;
+				sdev->eh_reset_level = EH_STARGET;
+				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+			} else {
+				if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				} else {
+					if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
+						schannel->pfaction = OFFLINE_POST_FAULT;
+						sdev->eh_reset_level = EH_SCHANNEL;
+						queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+					} else {
+						if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+							queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						} else {
+							shost->pfaction = OFFLINE_POST_FAULT;
+							sdev->eh_reset_level = EH_SHOST;
+							queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+						}
+					}
+				}
+			}
+		}
+	} else if ((hostt->eh_device_reset_handler && hostt->eh_target_reset_handler && hostt->eh_bus_reset_handler && hostt->eh_host_reset_handler)) {
+		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
+		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 sdev**），do sdev reset，失败离线，成功万事大吉; 
+		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，异常 target 功德圆满 GG 后；判断其所属 channel 是否健康：
+		*      1. SENTITY_ANY_RUNNING（**明确错误范围在 starget**），do target reset，失败离线，成功万事大吉；
+		*      2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel，这种情况下认为 channel 异常，异常 channel 功德圆满 GG 后；判断其所属 Host 是否健康：
+		*          1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉；
+		*          2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
+		*/
+		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) { /* 遍历 sdev */
+			sdev->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SDEV;
+			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+		} else {
+			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) { /* 可能有的 sdev GG 还在路上（比如说全部都超时了，但是仅过了10s），也可以提前终结掉；但是 IDLE 的一定全部都 stop 掉了 */
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			} else {
+				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
+					starget->pfaction = OFFLINE_POST_FAULT;
+					sdev->eh_reset_level = EH_STARGET;
+					queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+				} else {
+					if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
+						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					} else {
+						if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
+							schannel->pfaction = OFFLINE_POST_FAULT;
+							sdev->eh_reset_level = EH_SCHANNEL;
+							queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+						} else {
+							if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
+								queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						} else {
+							shost->pfaction = OFFLINE_POST_FAULT;
+							sdev->eh_reset_level = EH_SHOST;
+							queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+						}
+						}
+					}
+				}
+			}
+		}
+	} else {
+		pr_err("%s Implement nothing!\n", __func__);
+		/* ::: 一旦 sdev 异常，直接离线即可，因为底层没有任何 reset 手段 */
+		// 直接离线设备
+	}
+
+	return;
+}
+
 /**
  * scsi_eh_scmd_add_to_sdev - add scsi cmd to sdev.
  * @scmd:	scmd to run eh on.
@@ -330,26 +1280,221 @@ void scsi_eh_scmd_add(struct scsi_cmnd *scmd)
 void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 {
 	struct Scsi_Host *shost = scmd->device->host;
-	unsigned long flags;
-	//int ret;
+	struct scsi_device *sdev = scmd->device;
+	struct scsi_target *starget = sdev->sdev_target;
 
-	WARN_ON_ONCE(!shost->ehandler);
-	WARN_ON_ONCE(!test_bit(SCMD_STATE_INFLIGHT, &scmd->state));
+	sdev->scmd_failed++;
+	list_add_tail(&scmd->eh_entry, &sdev->dev_eh_cmd_q);
+	if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL) {
+		list_add_tail(&sdev->sdev_eh_siblings, &shost->eh_sdev);
+		sdev->eh_queued = true;
+		mutex_lock(&sdev->state_mutex);
+		scsi_device_set_state(sdev, SDEV_BLOCK);
+		mutex_unlock(&sdev->state_mutex);
+		atomic_set(&sdev->eh_sdev_state, EH_QUIESCE);
+	}
 
-	spin_lock_irqsave(shost->host_lock, flags);
-	if (shost->eh_deadline != -1 && !shost->last_reset)
-		shost->last_reset = jiffies;
-
-	scsi_eh_reset(scmd);
-
-	// list_add_tail(&scmd->eh_entry, &shost->eh_cmd_q);
-	// spin_unlock_irqrestore(shost->host_lock, flags);
-	// /*
-	//  * Ensure that all tasks observe the host state change before the
-	//  * host_failed change.
-	//  */
-	// call_rcu_hurry(&scmd->rcu, scsi_eh_inc_host_failed);
+	if (sdev->scmd_failed == scsi_device_busy(sdev)) {
+		atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+		starget->sdev_failed++;
+		pr_err("%s sdev_failed failed totally!\n", __func__);
+		queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100); // 每一个 sdev 功德圆满后，都会尝试唤醒 checkpoint 去搞一波
+	}
 }
+
+static void scsi_eh_sdev_reset(struct scsi_device *sdev)
+{
+	return;
+}
+
+
+
+static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *starget)
+{
+	struct Scsi_Host *shost = sdev->host;
+	const struct scsi_host_template *hostt = shost->hostt;
+	enum scsi_disposition rtn;
+	struct scsi_cmnd *scmd;
+
+	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+	if (!scmd) {
+		pr_err("%s: no scmd!\n", __func__);
+		return;
+	}
+
+	pr_err("%s op target reset, target_busy=%d!\n", __func__, atomic_read(&starget->target_busy));
+	rtn = hostt->eh_target_reset_handler(scmd);
+	if (rtn == SUCCESS) { /* target reset 成功 */
+		pr_err("%s Target reset success!\n", __func__);
+	} else {
+		// target reset 失败
+		pr_err("%s Target reset success!\n", __func__);
+		if (starget->pfaction == OFFLINE_POST_FAULT) {
+			;
+		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		}
+	}
+
+	return;
+}
+
+static void scsi_eh_schannel_reset(struct scsi_device *sdev,
+				   struct scsi_target *starget,
+				   struct scsi_channel *schannel)
+{
+	return;
+}
+
+static void scsi_eh_shost_reset(struct scsi_device *sdev,
+				   struct scsi_target *starget,
+				   struct scsi_channel *schannel,
+				   struct Scsi_Host *shost)
+{
+	struct scsi_cmnd *scmd;
+	enum scsi_disposition rtn;
+	const struct scsi_host_template *hostt = shost->hostt;
+	struct scsi_channel *_schannel;
+	struct scsi_target *_starget;
+	struct scsi_device *_sdev;
+
+	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+	if (!scmd) {
+		pr_err("%s: no scmd!\n", __func__);
+		return;
+	}
+
+	pr_err("%s op host reset!\n", __func__);
+	rtn = hostt->eh_host_reset_handler(scmd);
+	if (rtn == SUCCESS) { /* host reset 成功 */
+		pr_err("%s HRST success!\n", __func__);
+	} else {
+		// host reset 失败
+		pr_err("%s HRST failed!\n", __func__);
+		if (shost->pfaction == OFFLINE_POST_FAULT) {
+			pr_err("%s offline all dev and finish scmds!\n", __func__);
+			/* 
+			 * 遍历期间需要恢复 host 的状态：
+			 * 1. shost->eh_shost_state, shost->pfaction
+			 */
+			atomic_set(&shost->eh_shost_state, EH_NORMAL);
+			shost->pfaction = OFFLINE_POST_FAULT;
+			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
+				pr_err("%s channel id=%d\n", __func__, _schannel->channel);
+				/* 
+				* 遍历期间需要恢复 schannel 的状态：
+				* 1. schannel->eh_schannel_state, schannel->pfaction, schannel->eh_queued
+				*/
+				atomic_set(&_schannel->eh_schannel_state, EH_NORMAL);
+				_schannel->pfaction = OFFLINE_POST_FAULT;
+				if (_schannel->eh_queued) {
+					_schannel->eh_queued = false;
+					list_del(&schannel->schannel_eh_siblings);
+				}
+				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+					pr_err("%s starget id=%d\n", __func__, _starget->id);
+					/* 
+					 * 遍历期间需要恢复 starget 的状态：
+					 * 1. starget->eh_starget_state, starget->pfaction, starget->eh_queued
+					 */
+					atomic_set(&_starget->eh_starget_state, EH_NORMAL);
+					_starget->pfaction = OFFLINE_POST_FAULT;
+					if (_starget->eh_queued) {
+						_starget->eh_queued = false;
+						list_del(&starget->starget_eh_siblings);
+					}
+					list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+						pr_err("%s sdev id=%d\n", __func__, _sdev->id);
+						/* 
+						 * 遍历期间需要恢复 starget 的状态：
+						 * 1. sdev->eh_sdev_state, sdev->pfaction, sdev->eh_queued, sdev->eh_reset_level
+						 */
+						atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
+						_sdev->pfaction = OFFLINE_POST_FAULT;
+						_sdev->eh_reset_level = EH_SDEV;
+						if (_sdev->eh_queued) {
+							_sdev->eh_queued = false;
+							list_del(&sdev->sdev_eh_siblings);
+						}
+						mutex_lock(&_sdev->state_mutex);
+						scsi_device_set_state(_sdev, SDEV_OFFLINE);
+						mutex_unlock(&_sdev->state_mutex);
+						scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+						pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, _sdev->id);
+					}
+				}
+			}
+		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		}
+	}
+
+	return;
+}
+
+void scsi_eh_reset_worker(struct work_struct *work) 
+{
+	struct scsi_device *sdev = container_of(work, struct scsi_device, eh_reset_work.work);
+	struct scsi_target *starget = sdev->sdev_target;
+	struct scsi_channel *schannel = sdev->schannel;
+	struct Scsi_Host *shost = sdev->host;
+
+	pr_err("%s eh begin reset, reset level=%s\n",
+		__func__, scsi_eh_reset_level_name(sdev->eh_reset_level));
+	eh_host_statue_show(sdev);
+
+	switch(sdev->eh_reset_level){
+	case EH_SDEV: 
+		scsi_eh_sdev_reset(sdev);
+		break;
+	case EH_STARGET:
+		scsi_eh_starget_reset(sdev, starget);
+		break;
+	case EH_SCHANNEL:
+		scsi_eh_schannel_reset(sdev, starget, schannel);
+		break;
+	case EH_SHOST:
+		scsi_eh_shost_reset(sdev, starget, schannel, shost);
+		break;
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /**
  * scsi_timeout - Timeout function for normal scsi commands.
@@ -393,7 +1538,8 @@ enum blk_eh_timer_return scsi_timeout(struct request *req)
 	atomic_inc(&scmd->device->iodone_cnt);
 	if (scsi_abort_command(scmd) != SUCCESS) {
 		set_host_byte(scmd, DID_TIME_OUT);
-		scsi_eh_scmd_add(scmd);
+		//scsi_eh_scmd_add(scmd);
+		scsi_eh_scmd_add_to_sdev(scmd);
 	}
 
 	return BLK_EH_DONE;
