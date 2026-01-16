@@ -712,12 +712,16 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 {
 	struct scsi_channel *schannel;
 	bool need_wait = false;
+	unsigned long flags;
 
 	if (atomic_read(&shost->eh_shost_state) == EH_SCHEDULED || atomic_read(&shost->eh_shost_state) == EH_RUNNING)
 		return DONE;
 
 	/* 先阻塞 host */
+	spin_lock_irqsave(shost->host_lock, flags);
 	scsi_host_set_state(shost, SHOST_RECOVERY);
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
 	if (atomic_read(&shost->eh_shost_state) == EH_NORMAL) {
 		atomic_set(&shost->eh_shost_state, EH_QUIESCE);
 		// eh 域 是否在 host 优先直接看状态，不需要 check 挂了多少
@@ -1267,7 +1271,11 @@ void scsi_eh_check_point(struct work_struct *work)
 	} else {
 		pr_err("%s Implement nothing!\n", __func__);
 		/* ::: 一旦 sdev 异常，直接离线即可，因为底层没有任何 reset 手段 */
-		// 直接离线设备
+		mutex_lock(&sdev->state_mutex);
+		scsi_device_set_state(sdev, SDEV_OFFLINE);
+		mutex_unlock(&sdev->state_mutex);
+		scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+		pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, sdev->id);
 	}
 
 	return;
@@ -1346,6 +1354,49 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 	return;
 }
 
+
+static void eh_scsi_restart_operations(struct Scsi_Host *shost)
+{
+	unsigned long flags;
+
+	/*
+	 * next free up anything directly waiting upon the host.  this
+	 * will be requests for character device operations, and also for
+	 * ioctls to queued block devices.
+	 */
+	pr_err("%s waking up host to restart\n", __func__);
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	if (scsi_host_set_state(shost, SHOST_RUNNING))
+		if (scsi_host_set_state(shost, SHOST_CANCEL))
+			BUG_ON(scsi_host_set_state(shost, SHOST_DEL));
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	wake_up(&shost->host_wait);
+
+	/*
+	 * finally we need to re-initiate requests that may be pending.  we will
+	 * have had everything blocked while error handling is taking place, and
+	 * now that error recovery is done, we will need to ensure that these
+	 * requests are started.
+	 */
+	scsi_run_host_queues(shost);
+
+	/*
+	 * if eh is active and host_eh_scheduled is pending we need to re-run
+	 * recovery.  we do this check after scsi_run_host_queues() to allow
+	 * everything pent up since the last eh run a chance to make forward
+	 * progress before we sync again.  Either we'll immediately re-run
+	 * recovery or scsi_device_unbusy() will wake us again when these
+	 * pending commands complete.
+	 */
+	spin_lock_irqsave(shost->host_lock, flags);
+	if (shost->host_eh_scheduled) /* TODO 目前是跑不到的，但是后期我得考虑 */
+		if (scsi_host_set_state(shost, SHOST_RECOVERY))
+			WARN_ON(scsi_host_set_state(shost, SHOST_CANCEL_RECOVERY));
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
 static void scsi_eh_shost_reset(struct scsi_device *sdev,
 				   struct scsi_target *starget,
 				   struct scsi_channel *schannel,
@@ -1370,64 +1421,61 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 		pr_err("%s HRST success!\n", __func__);
 	} else {
 		// host reset 失败
-		pr_err("%s HRST failed!\n", __func__);
-		if (shost->pfaction == OFFLINE_POST_FAULT) {
-			pr_err("%s offline all dev and finish scmds!\n", __func__);
+		pr_err("%s HRST failed! Offline all dev and finish scmds!\n", __func__);
+		/* 
+		 * 遍历期间需要恢复 host 的状态：
+		 * 1. shost->eh_shost_state, shost->pfaction
+		 */
+		atomic_set(&shost->eh_shost_state, EH_NORMAL);
+		shost->pfaction = OFFLINE_POST_FAULT;
+		list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
+			pr_err("%s channel id=%d\n", __func__, _schannel->channel);
 			/* 
-			 * 遍历期间需要恢复 host 的状态：
-			 * 1. shost->eh_shost_state, shost->pfaction
-			 */
-			atomic_set(&shost->eh_shost_state, EH_NORMAL);
-			shost->pfaction = OFFLINE_POST_FAULT;
-			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
-				pr_err("%s channel id=%d\n", __func__, _schannel->channel);
+			* 遍历期间需要恢复 schannel 的状态：
+			* 1. schannel->eh_schannel_state, schannel->pfaction, schannel->eh_queued
+			*/
+			atomic_set(&_schannel->eh_schannel_state, EH_NORMAL);
+			_schannel->pfaction = OFFLINE_POST_FAULT;
+			if (_schannel->eh_queued) {
+				_schannel->eh_queued = false;
+				list_del(&schannel->schannel_eh_siblings);
+			}
+			list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+				pr_err("%s starget id=%d\n", __func__, _starget->id);
 				/* 
-				* 遍历期间需要恢复 schannel 的状态：
-				* 1. schannel->eh_schannel_state, schannel->pfaction, schannel->eh_queued
-				*/
-				atomic_set(&_schannel->eh_schannel_state, EH_NORMAL);
-				_schannel->pfaction = OFFLINE_POST_FAULT;
-				if (_schannel->eh_queued) {
-					_schannel->eh_queued = false;
-					list_del(&schannel->schannel_eh_siblings);
+				 * 遍历期间需要恢复 starget 的状态：
+				 * 1. starget->eh_starget_state, starget->pfaction, starget->eh_queued
+				 */
+				atomic_set(&_starget->eh_starget_state, EH_NORMAL);
+				_starget->pfaction = OFFLINE_POST_FAULT;
+				if (_starget->eh_queued) {
+					_starget->eh_queued = false;
+					list_del(&starget->starget_eh_siblings);
 				}
-				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
-					pr_err("%s starget id=%d\n", __func__, _starget->id);
+				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+					pr_err("%s sdev id=%d\n", __func__, _sdev->id);
 					/* 
 					 * 遍历期间需要恢复 starget 的状态：
-					 * 1. starget->eh_starget_state, starget->pfaction, starget->eh_queued
+					 * 1. sdev->eh_sdev_state, sdev->pfaction, sdev->eh_queued, sdev->eh_reset_level
 					 */
-					atomic_set(&_starget->eh_starget_state, EH_NORMAL);
-					_starget->pfaction = OFFLINE_POST_FAULT;
-					if (_starget->eh_queued) {
-						_starget->eh_queued = false;
-						list_del(&starget->starget_eh_siblings);
+					atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
+					_sdev->pfaction = OFFLINE_POST_FAULT;
+					_sdev->eh_reset_level = EH_SDEV;
+					if (_sdev->eh_queued) {
+						_sdev->eh_queued = false;
+						list_del(&sdev->sdev_eh_siblings);
 					}
-					list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
-						pr_err("%s sdev id=%d\n", __func__, _sdev->id);
-						/* 
-						 * 遍历期间需要恢复 starget 的状态：
-						 * 1. sdev->eh_sdev_state, sdev->pfaction, sdev->eh_queued, sdev->eh_reset_level
-						 */
-						atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
-						_sdev->pfaction = OFFLINE_POST_FAULT;
-						_sdev->eh_reset_level = EH_SDEV;
-						if (_sdev->eh_queued) {
-							_sdev->eh_queued = false;
-							list_del(&sdev->sdev_eh_siblings);
-						}
-						mutex_lock(&_sdev->state_mutex);
-						scsi_device_set_state(_sdev, SDEV_OFFLINE);
-						mutex_unlock(&_sdev->state_mutex);
-						scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
-						pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, _sdev->id);
-					}
+					mutex_lock(&_sdev->state_mutex);
+					scsi_device_set_state(_sdev, SDEV_OFFLINE);
+					mutex_unlock(&_sdev->state_mutex);
+					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+					pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, _sdev->id);
 				}
 			}
-		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 		}
 	}
+
+	eh_scsi_restart_operations(shost);
 
 	return;
 }

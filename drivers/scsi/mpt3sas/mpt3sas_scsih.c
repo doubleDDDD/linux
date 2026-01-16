@@ -3119,7 +3119,7 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	if (type == MPI2_SCSITASKMGMT_TASKTYPE_ABORT_TASK
 			|| type == MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET
 			|| type == MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET)
-			msleep(2000); /* 模拟10s的超时而且不触发host直接reset */
+			msleep(5000); /* 模拟10s的超时而且不触发host直接reset */
 
 	wait_for_completion_timeout(&ioc->tm_cmds.done, timeout*HZ);
 
@@ -3537,7 +3537,7 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 		MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET, 0, 0,
 	    tr_timeout, tr_method);
 	/* Check for busy commands after reset */
-	pr_err("%s r=0x%x starget->target_busy=%d\n", __func__, r, atomic_read(&starget->target_busy));
+	//pr_err("%s r=0x%x starget->target_busy=%d\n", __func__, r, atomic_read(&starget->target_busy));
 	// if (r == SUCCESS && atomic_read(&starget->target_busy))
 	r = FAILED;
  out:
