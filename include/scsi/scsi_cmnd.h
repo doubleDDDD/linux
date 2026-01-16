@@ -69,6 +69,7 @@ enum scsi_cmnd_submitter {
 	SUBMITTED_BY_BLOCK_LAYER = 0,
 	SUBMITTED_BY_SCSI_ERROR_HANDLER = 1,
 	SUBMITTED_BY_SCSI_RESET_IOCTL = 2,
+	SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER,
 } __packed;
 
 struct scsi_cmnd {

@@ -1721,6 +1721,8 @@ static void scsi_done_internal(struct scsi_cmnd *cmd, bool complete_directly)
 		break;
 	case SUBMITTED_BY_SCSI_ERROR_HANDLER:
 		return scsi_eh_done(cmd);
+	case SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER:
+		return new_scsi_eh_done(cmd);
 	case SUBMITTED_BY_SCSI_RESET_IOCTL:
 		return;
 	}

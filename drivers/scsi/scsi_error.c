@@ -794,9 +794,26 @@ static inline const char *scsi_eh_reset_level_name(enum scsi_eh_reset_level leve
 	}
 }
 
+static inline const char *scsi_device_show_state(enum scsi_device_state state)
+{
+	switch (state) {
+	case SDEV_CREATED: return "SDEV_CREATED";
+	case SDEV_RUNNING: return "SDEV_RUNNING";
+	case SDEV_CANCEL: return "SDEV_CANCEL";
+	case SDEV_DEL: return "SDEV_DEL";
+	case SDEV_QUIESCE: return "SDEV_QUIESCE";
+	case SDEV_OFFLINE: return "SDEV_OFFLINE";
+	case SDEV_TRANSPORT_OFFLINE: return "SDEV_TRANSPORT_OFFLINE";
+	case SDEV_BLOCK: return "SDEV_BLOCK";
+	case SDEV_CREATED_BLOCK: return "SDEV_CREATED_BLOCK";
+	default: return "EH_UNKNOWN";
+	}
+}
+
 static inline const char *scsi_eh_state_name(enum scsi_eh_state state);
 static inline const char *post_fault_action_name(enum post_fault_action pfaction);
 static inline const char *scsi_eh_reset_level_name(enum scsi_eh_reset_level level);
+static inline const char *scsi_device_show_state(enum scsi_device_state state);
 
 static void eh_host_statue_show(struct scsi_device *sdev)
 {
@@ -830,6 +847,9 @@ static void eh_host_statue_show(struct scsi_device *sdev)
 	pr_err("%s: schannel eh_queued =%d\n",
 		 __func__, schannel->eh_queued);
 	pr_err("\n");
+	pr_err("%s: sdev state is %s\n", __func__, scsi_device_show_state(sdev->sdev_state));
+	pr_err("\n");
+	pr_err("\n");
 	pr_err("\n");
 	pr_err("\n");
 	pr_err("\n");
@@ -859,6 +879,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_device_reset_handler\n", __func__);
 		sdev->pfaction = OFFLINE_POST_FAULT; // 其实是这一刻的现状
 		sdev->eh_reset_level = EH_SDEV;
+		eh_host_statue_show(sdev);
 		queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
 	} else if ((hostt->eh_target_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
 		/* ::: 只要有异常 sdev，直接阻塞对应 target（**这个是host的选择没有办法**），异常 sdev 所在的 target 功德圆满后 GG 后；判断其所属 channel 是否健康：
@@ -1275,7 +1296,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		scsi_device_set_state(sdev, SDEV_OFFLINE);
 		mutex_unlock(&sdev->state_mutex);
 		scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
-		pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, sdev->id);
+		pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
 	}
 
 	return;
@@ -1312,10 +1333,94 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 
 static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 {
+	struct Scsi_Host *shost = sdev->host;
+	const struct scsi_host_template *hostt = shost->hostt;
+	enum scsi_disposition rtn;
+	struct scsi_cmnd *scmd;
+
+	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+	if (!scmd) {
+		pr_err("%s: no scmd!\n", __func__);
+		return;
+	}
+
+	pr_err("%s op sdev reset, sdev id=%d!\n", __func__, sdev->id);
+	rtn = hostt->eh_device_reset_handler(scmd);
+	if (rtn == SUCCESS) { /* dev reset 成功 */
+		pr_err("%s Dev reset success!\n", __func__);
+		static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
+		struct scsi_eh_save ses;
+
+		/* 尝试发起 tur */
+		mutex_lock(&sdev->state_mutex);
+		scsi_device_set_state(sdev, SDEV_RUNNING);
+		mutex_unlock(&sdev->state_mutex);
+
+		scsi_eh_prep_cmnd(scmd, &ses, tur_command, 6, 0);
+		scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
+		sdev->after_reset_tur_timeout = true;
+		init_completion(&sdev->eh_wait_tur_done);
+		rtn = shost->hostt->queuecommand(shost, scmd);
+		if (!rtn) {
+			wait_for_completion_timeout(&sdev->eh_wait_tur_done, 10*HZ);
+			scsi_eh_restore_cmnd(scmd, &ses); /* 恢复 scmd */
+			scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
+			if (sdev->after_reset_tur_timeout) {/* tur 超时 */
+				mutex_lock(&sdev->state_mutex);
+				scsi_device_set_state(sdev, SDEV_BLOCK);
+				mutex_unlock(&sdev->state_mutex);
+				goto reset_fault;
+			}
+
+			/* tur 成功 */
+			pr_err("%s  sdev id=%d, tur success!\n", __func__, sdev->id);
+			/* 修改 sdev eh 相关的状态 */
+			atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
+			sdev->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SDEV;
+			if (sdev->eh_queued) {
+				sdev->eh_queued = false;
+				list_del(&sdev->sdev_eh_siblings);
+			}
+
+			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+			pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
+		} else {
+			scsi_eh_restore_cmnd(scmd, &ses); /* 恢复 scmd */
+			scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
+			mutex_lock(&sdev->state_mutex);
+			scsi_device_set_state(sdev, SDEV_BLOCK);
+			mutex_unlock(&sdev->state_mutex);
+			goto reset_fault;
+		}
+	} else { /* Dev reset 失败 */
+		pr_err("%s Dev reset fault!\n", __func__);
+reset_fault:
+		if (sdev->pfaction == OFFLINE_POST_FAULT) {
+			pr_err("%s ready to offline sdev id=%d!\n", __func__, sdev->id);
+			/* 
+			 * 遍历期间需要恢复 starget 的状态：
+			 * 1. sdev->eh_sdev_state, sdev->pfaction, sdev->eh_queued, sdev->eh_reset_level
+			 */
+			atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
+			sdev->pfaction = OFFLINE_POST_FAULT;
+			sdev->eh_reset_level = EH_SDEV;
+			if (sdev->eh_queued) {
+				sdev->eh_queued = false;
+				list_del(&sdev->sdev_eh_siblings);
+			}
+			mutex_lock(&sdev->state_mutex);
+			scsi_device_set_state(sdev, SDEV_OFFLINE);
+			mutex_unlock(&sdev->state_mutex);
+			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+			pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
+		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+		}
+	}
+
 	return;
 }
-
-
 
 static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *starget)
 {
@@ -1334,9 +1439,8 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	rtn = hostt->eh_target_reset_handler(scmd);
 	if (rtn == SUCCESS) { /* target reset 成功 */
 		pr_err("%s Target reset success!\n", __func__);
-	} else {
-		// target reset 失败
-		pr_err("%s Target reset success!\n", __func__);
+	} else { /* target reset 失败 */
+		pr_err("%s Target reset fault!\n", __func__);
 		if (starget->pfaction == OFFLINE_POST_FAULT) {
 			;
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
@@ -1455,7 +1559,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 					pr_err("%s sdev id=%d\n", __func__, _sdev->id);
 					/* 
-					 * 遍历期间需要恢复 starget 的状态：
+					 * 遍历期间需要恢复 sdev 的状态：
 					 * 1. sdev->eh_sdev_state, sdev->pfaction, sdev->eh_queued, sdev->eh_reset_level
 					 */
 					atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
@@ -1469,7 +1573,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 					scsi_device_set_state(_sdev, SDEV_OFFLINE);
 					mutex_unlock(&_sdev->state_mutex);
 					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
-					pr_err("%s sdev id=%d, finish flush scmd!\n", __func__, _sdev->id);
+					pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, _sdev->id, scsi_device_show_state(sdev->sdev_state));
 				}
 			}
 		}
@@ -2107,6 +2211,14 @@ void scsi_eh_done(struct scsi_cmnd *scmd)
 	eh_action = scmd->device->host->eh_action;
 	if (eh_action)
 		complete(eh_action);
+}
+
+void new_scsi_eh_done(struct scsi_cmnd *scmd)
+{
+	struct scsi_device *sdev = scmd->device;
+
+	sdev->after_reset_tur_timeout = false;
+	complete(&sdev->eh_wait_tur_done);
 }
 
 /**

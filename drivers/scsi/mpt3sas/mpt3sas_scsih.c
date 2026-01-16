@@ -3390,6 +3390,8 @@ scsih_abort(struct scsi_cmnd *scmd)
 	return r;
 }
 
+static bool scsih_dev_reset_success = false;
+
 /**
  * scsih_dev_reset - eh threads main device reset routine
  * @scmd: pointer to scsi command object
@@ -3457,12 +3459,12 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 		MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET, 0, 0,
 		tr_timeout, tr_method);
 	/* Check for busy commands after reset */
-	pr_err("%s r=%d if busy=%d\n", __func__, r, scsi_device_busy(scmd->device));
-	// if (r == SUCCESS && scsi_device_busy(scmd->device))
-	// 	r = FAILED;
+	// pr_err("%s r=%d if busy=%d\n", __func__, r, scsi_device_busy(scmd->device));
  out:
 	sdev_printk(KERN_INFO, scmd->device, "device reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
+	if (r == SUCCESS)
+		scsih_dev_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -5178,7 +5180,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	mq_ctx = rq->mq_ctx;
 	mq_hctx = rq->mq_hctx;
 	//if (ioc->logging_level & MPT_DEBUG_SCSI)
-	//scsi_print_command(scmd);
+	scsi_print_command(scmd);
 	//dump_stack();
 	//pr_err("%s nr_ctx=%d, queue_num=%d\n", __func__, mq_hctx->nr_ctx, mq_hctx->queue_num);
 
@@ -5312,11 +5314,13 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		mpt3sas_setup_direct_io(ioc, scmd,
 			raid_device, mpi_request);
 
+	//if (!scsih_dev_reset_success) {
 	overtimecount++;
 	if (overtimecount > 1888) {
 		pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
 		return 0;
 	}
+	//}
 
 	if (likely(mpi_request->Function == MPI2_FUNCTION_SCSI_IO_REQUEST)) {
 		if (sas_target_priv_data->flags & MPT_TARGET_FASTPATH_IO) {
@@ -12021,8 +12025,8 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
 	.eh_device_reset_handler	= scsih_dev_reset,
-	.eh_target_reset_handler	= scsih_target_reset,
-	.eh_host_reset_handler		= scsih_host_reset,
+	// .eh_target_reset_handler	= scsih_target_reset,
+	// .eh_host_reset_handler		= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,

@@ -161,10 +161,12 @@ struct scsi_device {
 	struct list_head dev_eh_cmd_q;
 	struct list_head sdev_eh_siblings;
 	enum post_fault_action pfaction;
-	bool eh_queued;
 	enum scsi_eh_reset_level eh_reset_level;
 	struct delayed_work checkpoint_work;
 	struct delayed_work eh_reset_work;
+	struct completion eh_wait_tur_done;
+	bool eh_queued;
+	bool after_reset_tur_timeout;
 	/**********************************************/
 
 	atomic_t restarts;
