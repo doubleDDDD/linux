@@ -3541,7 +3541,7 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	/* Check for busy commands after reset */
 	//pr_err("%s r=0x%x starget->target_busy=%d\n", __func__, r, atomic_read(&starget->target_busy));
 	// if (r == SUCCESS && atomic_read(&starget->target_busy))
-	r = FAILED;
+	// r = FAILED;
  out:
 	starget_printk(KERN_INFO, starget, "target reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
@@ -12024,9 +12024,9 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.scan_start			= scsih_scan_start,
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
-	.eh_device_reset_handler	= scsih_dev_reset,
-	// .eh_target_reset_handler	= scsih_target_reset,
-	// .eh_host_reset_handler		= scsih_host_reset,
+	//.eh_device_reset_handler	= scsih_dev_reset,
+	.eh_target_reset_handler	= scsih_target_reset,
+	//.eh_host_reset_handler		= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,
