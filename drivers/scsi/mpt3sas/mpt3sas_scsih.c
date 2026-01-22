@@ -3474,6 +3474,7 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
+static bool scsih_target_reset_success = false;
 /**
  * scsih_target_reset - eh threads main target reset routine
  * @scmd: pointer to scsi command object
@@ -3545,6 +3546,9 @@ scsih_target_reset(struct scsi_cmnd *scmd)
  out:
 	starget_printk(KERN_INFO, starget, "target reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
+
+	if (r == SUCCESS)
+		scsih_target_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -5314,13 +5318,13 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		mpt3sas_setup_direct_io(ioc, scmd,
 			raid_device, mpi_request);
 
-	//if (!scsih_dev_reset_success) {
-	overtimecount++;
-	if (overtimecount > 1888) {
-		pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
-		return 0;
+	if (!scsih_target_reset_success) {
+		overtimecount++;
+		if (overtimecount > 1888) {
+			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
+			return 0;
+		}
 	}
-	//}
 
 	if (likely(mpi_request->Function == MPI2_FUNCTION_SCSI_IO_REQUEST)) {
 		if (sas_target_priv_data->flags & MPT_TARGET_FASTPATH_IO) {

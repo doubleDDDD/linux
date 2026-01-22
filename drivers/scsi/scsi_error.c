@@ -1435,10 +1435,10 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	enum scsi_disposition rtn;
 	struct scsi_cmnd *scmd, *_scmd;
 	struct scsi_device *_sdev;
-	struct scsi_eh_save *ses;
-	int *queue_tur_rtn;
 	int sdev_index = 0;
-	int failure_ture = 0;
+	int failure_tur = 0;
+	int finished_tur = 0;
+	int loop_count = 0;
 
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	if (!scmd) {
@@ -1449,37 +1449,81 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	pr_err("%s op target reset, target_busy=%d!\n", __func__, atomic_read(&starget->target_busy));
 	rtn = hostt->eh_target_reset_handler(scmd);
 	if (rtn == SUCCESS) { /* target reset 成功 */
-		pr_err("%s Target reset success!\n", __func__);
+		pr_err("%s Target(channel=%d, id=%d) reset success!\n", __func__, starget->channel, starget->id);
 		/* 尝试对 target 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 target reset 就是成功的，就无法离线 target 下的所有设备 */
 		static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
-		ses = kcalloc(starget->sdev_failed, sizeof(struct scsi_eh_save), GFP_KERNEL);
-    		queue_tur_rtn = kcalloc(starget->sdev_failed, sizeof(int), GFP_KERNEL);
 		list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 			_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 			BUG_ON(!scmd);
 			mutex_lock(&_sdev->state_mutex);
 			scsi_device_set_state(_sdev, SDEV_RUNNING);
 			mutex_unlock(&_sdev->state_mutex);
-			scsi_eh_prep_cmnd(_scmd, &ses[sdev_index], tur_command, 6, 0);
+			if(!_sdev->ses)
+				_sdev->ses = kzalloc(sizeof(struct scsi_eh_save), GFP_KERNEL);
+			scsi_eh_prep_cmnd(_scmd, _sdev->ses, tur_command, 6, 0);
 			_scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
 			_sdev->after_reset_tur_timeout = true;
 			init_completion(&_sdev->eh_wait_tur_done);
-			queue_tur_rtn[sdev_index] = shost->hostt->queuecommand(shost, _scmd);
-			if (queue_tur_rtn[sdev_index])
-				failure_ture++;
+			rtn = shost->hostt->queuecommand(shost, _scmd);
+			if (rtn)
+				failure_tur++;
 			sdev_index++;
 		}
 
-		if (failure_ture == starget->sdev_failed)
+		if (failure_tur == starget->sdev_failed) {/* 所有 sdev 的 tur 都是失败的，那就直接失败 */
+			pr_err("%s target(channel=%d, id=%d) reset, all tur GG!\n", __func__, starget->channel, starget->id);
 			goto reset_fault;
-		
-		/* 
-		 * 接下来要检查超时的问题 
-		 */
-		for (sdev_index = 0; sdev_index < starget->sdev_failed; sdev_index++) {
-			;
 		}
-		// 但有一个成功的，那么 target reset 就算是成功的
+
+		/* 
+		 * 接下来要检查超时的问题
+		 *	需要检查所有的超时，理论上我遍历 after_reset_tur_timeout（完成变量的 done） 就可以了
+		 *	但是这里有一个关键点，如果有正常完成 ready 的 tur，需要有控制逻辑控制走下去，而没有完成的还可以继续等待
+		 *	可能真的需要引入一个额外的线程或 worker
+		 *	但有一个成功的，那么 target reset 就算是成功的
+		 *	如果成功失败都存在，失败的直接离线，成功的恢复，对应的数据结构做释放即可
+		 */
+		pr_err("%s Target(channel=%d, id=%d) reset, wait tur finish!\n", __func__, starget->channel, starget->id);
+		while (true) {
+			list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+				_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+				BUG_ON(!_scmd);
+				if (completion_done(&_sdev->eh_wait_tur_done)) {
+					pr_err("%s sdev %d tur complete\n", __func__, _sdev->id);
+					finished_tur++;
+					atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
+					_sdev->pfaction = OFFLINE_POST_FAULT;
+					_sdev->eh_reset_level = EH_SDEV;
+					scsi_eh_restore_cmnd(_scmd, _sdev->ses); /* 恢复 scmd */
+					scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
+					pr_err("%s  sdev id=%d, tur success!\n", __func__, sdev->id);
+					/* 修改 sdev eh 相关的状态 */
+					atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
+					_sdev->pfaction = OFFLINE_POST_FAULT;
+					_sdev->eh_reset_level = EH_SDEV;
+					if (_sdev->eh_queued) {
+						_sdev->eh_queued = false;
+						list_del(&_sdev->sdev_eh_siblings);
+					}
+					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+					pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, _sdev->id, scsi_device_show_state(_sdev->sdev_state));
+				}
+			}
+
+			if (finished_tur == starget->sdev_failed)
+				break;
+
+			msleep(1000);
+			loop_count++;
+			if (loop_count > 10)
+				break;
+		}
+
+		/* 但有一个成功的，那么 target reset 就算是成功的 */
+		if (!finished_tur)
+			goto reset_fault;
+
+		/* 如果全部都 ok 的话，target的状态也需要修改 */
 	} else { /* target reset 失败 */
 		pr_err("%s Target reset fault!\n", __func__);
 reset_fault:
