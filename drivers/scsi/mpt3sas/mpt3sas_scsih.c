@@ -3557,6 +3557,13 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
+// static bool scsih_bus_reset_success = false;
+static int
+scsih_bus_reset(struct scsi_cmnd *scmd)
+{
+	//return SUCCESS;
+	return FAILED;
+}
 
 /**
  * scsih_host_reset - eh threads main host reset routine
@@ -12029,8 +12036,9 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
 	//.eh_device_reset_handler	= scsih_dev_reset,
-	.eh_target_reset_handler	= scsih_target_reset,
-	//.eh_host_reset_handler		= scsih_host_reset,
+	// .eh_target_reset_handler	= scsih_target_reset,
+	.eh_bus_reset_handler		= scsih_bus_reset,
+	//.eh_host_reset_handler	= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,
