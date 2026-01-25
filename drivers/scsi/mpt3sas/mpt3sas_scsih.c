@@ -3557,12 +3557,13 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-// static bool scsih_bus_reset_success = false;
+static bool scsih_bus_reset_success = false;
 static int
 scsih_bus_reset(struct scsi_cmnd *scmd)
 {
-	//return SUCCESS;
-	return FAILED;
+	scsih_bus_reset_success = true;
+	return SUCCESS;
+	//return FAILED;
 }
 
 /**
@@ -5325,7 +5326,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		mpt3sas_setup_direct_io(ioc, scmd,
 			raid_device, mpi_request);
 
-	if (!scsih_target_reset_success) {
+	if (!scsih_bus_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);

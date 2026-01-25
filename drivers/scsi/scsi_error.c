@@ -497,6 +497,8 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 		if (scsi_device_busy(sdev) == sdev->scmd_failed) {
 			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
 			starget->sdev_failed++;
+			if (sdev->scmd_failed == 0)
+				sdev->idle = true;
 		} else {
 			need_wait = true;
 		}
@@ -525,7 +527,8 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 
 		if (scsi_device_busy(sdev) == sdev->scmd_failed) {
 			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
-			starget->sdev_failed++;
+			if (sdev->scmd_failed == 0)
+				sdev->idle = true;
 		} else {
 			need_wait = true;
 		}
@@ -1364,6 +1367,33 @@ static void scsi_eh_offline_sdev(struct scsi_device *sdev)
 	pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
 }
 
+static void send_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
+{
+	static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
+
+	mutex_lock(&sdev->state_mutex);
+	scsi_device_set_state(sdev, SDEV_RUNNING);
+	mutex_unlock(&sdev->state_mutex);
+	if(!sdev->ses)
+		sdev->ses = kzalloc(sizeof(struct scsi_eh_save), GFP_KERNEL);
+	scsi_eh_prep_cmnd(scmd, sdev->ses, tur_command, 6, 0);
+	scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
+	sdev->after_reset_tur_timeout = true;
+	init_completion(&sdev->eh_wait_tur_done);
+}
+
+static void scsi_eh_finish_scmd_after_reset(struct scsi_device *sdev, struct scsi_cmnd *scmd)
+{
+	scsi_eh_restore_cmnd(scmd, sdev->ses); /* 恢复 scmd */
+	kfree(sdev->ses);
+	sdev->ses = NULL;
+	scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
+	pr_err("%s  sdev id=%d, tur success!\n", __func__, sdev->id);
+	scsi_eh_recover_sdev(sdev);
+	scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+	pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
+}
+
 /* TODO reset 本身的超时检测 */
 static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 {
@@ -1382,23 +1412,15 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 	rtn = hostt->eh_device_reset_handler(scmd);
 	if (rtn == SUCCESS) { /* dev reset 成功 */
 		pr_err("%s Dev reset success!\n", __func__);
-		static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
-		struct scsi_eh_save ses;
-
-		/* 尝试发起 tur */
-		mutex_lock(&sdev->state_mutex);
-		scsi_device_set_state(sdev, SDEV_RUNNING);
-		mutex_unlock(&sdev->state_mutex);
-
-		scsi_eh_prep_cmnd(scmd, &ses, tur_command, 6, 0);
-		scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
-		sdev->after_reset_tur_timeout = true;
-		init_completion(&sdev->eh_wait_tur_done);
+		send_tur_to_sdev(sdev, scmd);
 		rtn = shost->hostt->queuecommand(shost, scmd);
 		if (!rtn) {
 			wait_for_completion_timeout(&sdev->eh_wait_tur_done, 10*HZ);
-			scsi_eh_restore_cmnd(scmd, &ses); /* 恢复 scmd */
+			scsi_eh_restore_cmnd(scmd, sdev->ses); /* 恢复 scmd */
+			kfree(sdev->ses);
+			sdev->ses = NULL;
 			scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
+
 			if (sdev->after_reset_tur_timeout) {/* tur 超时 */
 				mutex_lock(&sdev->state_mutex);
 				scsi_device_set_state(sdev, SDEV_BLOCK);
@@ -1413,7 +1435,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
 			pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, sdev->id, scsi_device_show_state(sdev->sdev_state));
 		} else {
-			scsi_eh_restore_cmnd(scmd, &ses); /* 恢复 scmd */
+			scsi_eh_restore_cmnd(scmd, sdev->ses); /* 恢复 scmd */
 			scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
 			mutex_lock(&sdev->state_mutex);
 			scsi_device_set_state(sdev, SDEV_BLOCK);
@@ -1481,19 +1503,10 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	if (rtn == SUCCESS) { /* target reset 成功 */
 		pr_err("%s Target(channel=%d, id=%d) reset success!\n", __func__, starget->channel, starget->id);
 		/* 尝试对 target 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 target reset 就是成功的，就无法离线 target 下的所有设备 */
-		static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
 		list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 			_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 			BUG_ON(!_scmd);
-			mutex_lock(&_sdev->state_mutex);
-			scsi_device_set_state(_sdev, SDEV_RUNNING);
-			mutex_unlock(&_sdev->state_mutex);
-			if(!_sdev->ses)
-				_sdev->ses = kzalloc(sizeof(struct scsi_eh_save), GFP_KERNEL);
-			scsi_eh_prep_cmnd(_scmd, _sdev->ses, tur_command, 6, 0);
-			_scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
-			_sdev->after_reset_tur_timeout = true;
-			init_completion(&_sdev->eh_wait_tur_done);
+			send_tur_to_sdev(_sdev, _scmd);
 			rtn = shost->hostt->queuecommand(shost, _scmd);
 			if (rtn)
 				failure_tur++;
@@ -1520,22 +1533,11 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 				if (completion_done(&_sdev->eh_wait_tur_done)) {
 					pr_err("%s sdev %d tur complete\n", __func__, _sdev->id);
 					finished_tur++;
-					atomic_set(&_sdev->eh_sdev_state, EH_NORMAL);
-					_sdev->pfaction = OFFLINE_POST_FAULT;
-					_sdev->eh_reset_level = EH_SDEV;
-					scsi_eh_restore_cmnd(_scmd, _sdev->ses); /* 恢复 scmd */
-					kfree(_sdev->ses);
-					_sdev->ses = NULL;
-					scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
-					pr_err("%s  sdev id=%d, tur success!\n", __func__, sdev->id);
-					/* 修改 sdev eh 相关的状态 */
-					scsi_eh_recover_sdev(_sdev);
-					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
-					pr_err("%s sdev id=%d, finish flush scmd, sdev state=%s!\n", __func__, _sdev->id, scsi_device_show_state(_sdev->sdev_state));
+					scsi_eh_finish_scmd_after_reset(_sdev, _scmd);
 				}
 			}
 
-			if (finished_tur == starget->sdev_failed)
+			if (finished_tur == starget->total_sdevs)
 				break;
 
 			msleep(1000);
@@ -1593,9 +1595,14 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 	struct scsi_cmnd *scmd, *_scmd;
 	struct scsi_target *_starget;
 	struct scsi_device *_sdev;
-	int failure_tur = 0;
-	// int finished_tur = 0;
-	// // int loop_count = 0;
+	int failure_tur_total = 0;
+	int failure_tur_in_target = 0;
+	int sdev_idle_in_target = 0;
+	int failure_target = 0;
+	int finished_tur_total = 0;
+	int finished_tur_in_target = 0;
+	int finished_all_tur_targets = 0;
+	int loop_count = 0;
 
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	if (!scmd) {
@@ -1606,35 +1613,111 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 	pr_err("%s op bus reset!\n", __func__);
 	rtn = hostt->eh_bus_reset_handler(scmd);
 	if (rtn == SUCCESS) {
-		pr_err("%s channel=%d reset success!\n", __func__, schannel->channel);
+		pr_err("%s host %d channel %d reset success!\n", __func__, shost->unique_id, schannel->channel);
 		/* 尝试对 schannel 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 schannel reset 就是成功的，就无法离线 schannel 下的所有设备 */
-		static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
 		list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
-			list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+			failure_tur_in_target = 0;
+			sdev_idle_in_target = 0;
+			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 				_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
-				BUG_ON(!_scmd);
-				mutex_lock(&_sdev->state_mutex);
-				scsi_device_set_state(_sdev, SDEV_RUNNING);
-				mutex_unlock(&_sdev->state_mutex);
-				if(!_sdev->ses)
-					_sdev->ses = kzalloc(sizeof(struct scsi_eh_save), GFP_KERNEL);
-				scsi_eh_prep_cmnd(_scmd, _sdev->ses, tur_command, 6, 0);
-				_scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
-				_sdev->after_reset_tur_timeout = true;
-				init_completion(&_sdev->eh_wait_tur_done);
+				if (!_sdev->idle)
+					BUG_ON(!_scmd);
+
+				if (_sdev->idle) {
+					sdev_idle_in_target++;
+					continue;
+				}
+
+				send_tur_to_sdev(_sdev, _scmd);
 				rtn = shost->hostt->queuecommand(shost, _scmd);
-				if (rtn)
-					failure_tur++;
+				if (rtn) {
+					failure_tur_in_target++;
+					failure_tur_total++;
+				}
+			}
+
+			if (failure_tur_in_target + sdev_idle_in_target == starget->sdev_failed)
+				if (failure_tur_in_target !=0 )
+					failure_target++;
+
+			pr_err("%s hostid %d channel id %d, target %d: send all tur done, target total_sdevs=%d, target sdev_failed=%d, failure_tur_in_target=%d, sdev_idle_in_target=%d\n",
+				 __func__, shost->unique_id, schannel->channel, _starget->id,
+				 starget->total_sdevs, starget->sdev_failed, failure_tur_in_target, sdev_idle_in_target);
+		}
+
+		pr_err("%s hostid %d channel id %d send all tur done, channel total_stargets=%d, starget_failed=%d, failure_tur_total=%d, failure_target=%d\n",
+			__func__, shost->unique_id, schannel->channel, schannel->total_stargets, schannel->starget_failed, failure_tur_total, failure_target);
+
+		if (failure_target == schannel->starget_failed) {/* 没有任何成功的 tur，那就直接失败 */
+			pr_err("%s hostid %d channel id %d, reset all target, all sdev's tur GG!\n", __func__, shost->unique_id, starget->channel);
+			goto reset_fault;
+		}
+
+		pr_err("%s hostid %d channel id %d: wait all sdevs tur finish!\n", __func__, shost->unique_id, schannel->channel);
+		while (true) {
+			list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+				finished_tur_in_target = 0;
+				sdev_idle_in_target = 0;
+				list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
+					_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+					if (!_sdev->idle)
+						BUG_ON(!_scmd);
+
+					if (_sdev->idle) {
+						sdev_idle_in_target++;
+						continue;
+					}
+
+					if (completion_done(&_sdev->eh_wait_tur_done)) {
+						pr_err("%s sdev %d tur complete\n", __func__, _sdev->id);
+						finished_tur_total++;
+						finished_tur_in_target++;
+						scsi_eh_finish_scmd_after_reset(_sdev, _scmd); /* 恢复 sdev 状态 */
+					}
+				}
+
+				if (finished_tur_in_target + sdev_idle_in_target == _starget->total_sdevs)
+					finished_all_tur_targets++;
+			}
+
+			if (finished_all_tur_targets == schannel->starget_failed)
+				break;
+
+			msleep(1000);
+			loop_count++;
+			if (loop_count > 10)
+				break;
+		}
+
+		pr_err("%s hostid %d channel id %d send all tur wait done, finished_tur_total=%d, finished_all_tur_targets=%d\n",
+			__func__, shost->unique_id, schannel->channel, finished_tur_total, finished_all_tur_targets);
+
+
+		if (!finished_tur_total)
+			goto reset_fault;
+
+		/* 检查依然超时的 sdev 进行离线处理 */
+		list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+			/* 恢复 target 状态 */
+			scsi_eh_recover_starget(_starget);
+
+			list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+				if (_sdev->idle)
+					continue;
+
+				if (completion_done(&_sdev->eh_wait_tur_done))
+					continue;
+
+				scsi_eh_offline_sdev(sdev);
 			}
 		}
-		// if (failure_tur == schannel->starget_failed) {/* 所有 sdev 的 tur 都是失败的，那就直接失败 */
-		// 	pr_err("%s target(channel=%d, id=%d) reset, all tur GG!\n", __func__, starget->channel, starget->id);
-		// 	goto reset_fault;
-		// }
-		// kfree(_sdev->ses);
-		// _sdev->ses = NULL;
+
+		/* 恢复 schannel 状态 */
+		scsi_eh_recover_schannel(schannel);
+		pr_err("%s channel id=%d, finish eh reset!\n", __func__, schannel->channel);
 	} else {
 		pr_err("%s channel reset fault!\n", __func__);
+reset_fault:
 		if (schannel->pfaction == OFFLINE_POST_FAULT) { /* 先遍历 target，再遍历 sdev，一个一个 offline */
 			pr_err("%s channel=%d!\n", __func__, schannel->channel);
 			list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) { // 遍历 channel 下的 target
@@ -1720,6 +1803,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 	rtn = hostt->eh_host_reset_handler(scmd);
 	if (rtn == SUCCESS) { /* host reset 成功 */
 		pr_err("%s HRST success!\n", __func__);
+		// TODO 妈的还没开始呢
 	} else {
 		// host reset 失败
 		pr_err("%s HRST failed! Offline all dev and finish scmds!\n", __func__);

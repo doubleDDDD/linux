@@ -168,6 +168,7 @@ struct scsi_device {
 	bool eh_queued;
 	bool after_reset_tur_timeout;
 	struct scsi_eh_save *ses;
+	bool idle;
 	/**********************************************/
 
 	atomic_t restarts;
