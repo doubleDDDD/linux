@@ -3557,15 +3557,16 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_bus_reset_success = false;
-static int
-scsih_bus_reset(struct scsi_cmnd *scmd)
-{
-	scsih_bus_reset_success = true;
-	return SUCCESS;
-	//return FAILED;
-}
+// static bool scsih_bus_reset_success = false;
+// static int
+// scsih_bus_reset(struct scsi_cmnd *scmd)
+// {
+// 	scsih_bus_reset_success = true;
+// 	return SUCCESS;
+// 	//return FAILED;
+// }
 
+static bool scsih_host_reset_success = false;
 /**
  * scsih_host_reset - eh threads main host reset routine
  * @scmd: pointer to scsi command object
@@ -3592,8 +3593,8 @@ scsih_host_reset(struct scsi_cmnd *scmd)
 out:
 	ioc_info(ioc, "host reset: %s scmd(0x%p)\n",
 		 r == SUCCESS ? "SUCCESS" : "FAILED", scmd);
-	
-	r = FAILED;
+	if (r == SUCCESS)
+		scsih_host_reset_success = true;
 
 	return r;
 }
@@ -5326,7 +5327,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		mpt3sas_setup_direct_io(ioc, scmd,
 			raid_device, mpi_request);
 
-	if (!scsih_bus_reset_success) {
+	if (!scsih_host_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
@@ -12036,9 +12037,9 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.scan_start			= scsih_scan_start,
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
-	//.eh_device_reset_handler	= scsih_dev_reset,
-	// .eh_target_reset_handler	= scsih_target_reset,
-	.eh_bus_reset_handler		= scsih_bus_reset,
+	.eh_device_reset_handler	= scsih_dev_reset,
+	//.eh_target_reset_handler	= scsih_target_reset,
+	//.eh_bus_reset_handler		= scsih_bus_reset,
 	//.eh_host_reset_handler	= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,

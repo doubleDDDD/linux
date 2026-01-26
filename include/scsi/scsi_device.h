@@ -166,7 +166,6 @@ struct scsi_device {
 	struct delayed_work eh_reset_work;
 	struct completion eh_wait_tur_done;
 	bool eh_queued;
-	bool after_reset_tur_timeout;
 	struct scsi_eh_save *ses;
 	bool idle;
 	/**********************************************/
