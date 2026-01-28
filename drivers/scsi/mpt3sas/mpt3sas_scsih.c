@@ -5330,8 +5330,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	/* KIOXIA/SAMSUNG/BROADCOM */
 	if (!scsih_target_reset_success) {
 		overtimecount++;
-		// && strstr(scmd->device->vendor, "KIOXIA")
-		if (overtimecount > 1888) {
+		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
 			return 0;
 		}

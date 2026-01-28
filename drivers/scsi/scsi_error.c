@@ -961,6 +961,7 @@ void scsi_eh_check_point(struct work_struct *work)
 	const struct scsi_host_template *hostt = shost->hostt;
 
 	pr_err("%s check_point wakeup!\n", __func__);
+	queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 	/* 底层驱动实现 handler 的可能性不同，这里需要评估策略，最简单的就是一个大case，根据底层不同的实现先分开 */
 	if ((hostt->eh_device_reset_handler) && (!hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
 		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
@@ -2117,11 +2118,23 @@ void scsi_eh_reset_worker(struct work_struct *work)
 	}
 }
 
+void scsi_eh_debug_worker(struct work_struct *work) 
+{
+	struct scsi_device *sdev = container_of(work, struct scsi_device, eh_debug_work.work);
+	struct scsi_target *starget = sdev->sdev_target;
+	struct scsi_channel *schannel = sdev->schannel;
+	struct Scsi_Host *shost = sdev->host;
 
+	scsi_eh_locate_sdev(sdev);
+	scsi_eh_locate_starget(starget);
+	scsi_eh_locate_schannel(schannel);
+	scsi_eh_locate_shost(shost);
+	pr_err("%s here!\n", __func__);
 
+	queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 
-
-
+	return;
+}
 
 
 

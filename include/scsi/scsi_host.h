@@ -561,6 +561,7 @@ struct Scsi_Host {
 	struct list_head eh_schannel; /* 所有异常的schannel */
 	struct workqueue_struct *eh_checkpoint; /* checkpoint的工作队列 */
 	struct workqueue_struct *eh_process; /* checkpoint的工作队列 */
+	struct workqueue_struct *eh_debug; /* debug的工作队列，没事就干跑，有事我就采样 */
 	atomic_t eh_shost_state;
 	enum post_fault_action pfaction;
 	unsigned int schannel_failed;

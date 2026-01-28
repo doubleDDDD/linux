@@ -315,6 +315,7 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	INIT_WORK(&sdev->requeue_work, scsi_requeue_run_queue);
 	INIT_DELAYED_WORK(&sdev->checkpoint_work, scsi_eh_check_point);
 	INIT_DELAYED_WORK(&sdev->eh_reset_work, scsi_eh_reset_worker);
+	INIT_DELAYED_WORK(&sdev->eh_debug_work, scsi_eh_debug_worker);
 
 	sdev->sdev_gendev.parent = get_device(&starget->dev);
 	sdev->sdev_target = starget;

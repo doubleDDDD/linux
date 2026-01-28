@@ -164,6 +164,7 @@ struct scsi_device {
 	enum scsi_eh_reset_level eh_reset_level;
 	struct delayed_work checkpoint_work;
 	struct delayed_work eh_reset_work;
+	struct delayed_work eh_debug_work;
 	struct completion eh_wait_tur_done;
 	bool eh_queued;
 	struct scsi_eh_save *ses;
