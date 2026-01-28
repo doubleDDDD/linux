@@ -638,8 +638,10 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 		if (atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED)
 			continue;
 
-		if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL)
+		if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL) {
 			atomic_set(&sdev->eh_sdev_state, EH_QUIESCE);
+			sdev->is_worker_waiting = true;
+		}
 
 		mutex_lock(&sdev->state_mutex);
 		scsi_device_set_state(sdev, SDEV_BLOCK);
@@ -650,6 +652,8 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 			starget->sdev_failed++;
 			if (sdev->scmd_failed == 0)
 				sdev->idle = true;
+			pr_err("%s: %s failed, starget->sdev_failed=%d, sdev->scmd_failed=%d\n",
+				__func__, scsi_eh_locate_sdev(sdev), starget->sdev_failed, sdev->scmd_failed);
 		} else {
 			need_wait = true;
 		}
@@ -661,7 +665,11 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
 		// channel 的 target failed++
 		schannel->starget_failed++; /* 但是这里无法保证 channel 处于 EH_QUIESCE，所以无动作 */
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
+
+	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	return need_wait;
 }
@@ -678,8 +686,11 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 
 		if (scsi_device_busy(sdev) == sdev->scmd_failed) {
 			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+			starget->sdev_failed++;
 			if (sdev->scmd_failed == 0)
 				sdev->idle = true;
+			pr_err("%s: %s failed, starget->sdev_failed=%d, sdev->scmd_failed=%d\n",
+				 __func__, scsi_eh_locate_sdev(sdev), starget->sdev_failed, sdev->scmd_failed);
 		} else {
 			need_wait = true;
 		}
@@ -691,7 +702,11 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
 		// channel 的 target failed++
 		schannel->starget_failed++; /* 但是这里无法保证 channel 处于 EH_QUIESCE，所以无动作 */
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
+
+	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	return need_wait;
 }
@@ -743,24 +758,28 @@ static enum eh_update_result update_eh_field_to_target(struct scsi_target *starg
 	struct scsi_channel *schannel = starget->schannel;
 	bool need_wait = false;
 
-	if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED || atomic_read(&starget->eh_starget_state) == EH_RUNNING) // 可以直接升级到 target，如果已经running了，reset 线程自然会拦截
+	if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED || atomic_read(&starget->eh_starget_state) == EH_RUNNING) /* 可以直接升级到 target，如果已经running了，reset 线程自然会拦截 */
 		return DONE;
 
-	if (atomic_read(&starget->eh_starget_state) == EH_NORMAL) { // 第一次进入
-		atomic_set(&starget->eh_starget_state, EH_QUIESCE); // 修改 target 状态
-		list_add_tail(&starget->starget_eh_siblings, &shost->eh_starget); // 将该 target 挂到 host 上
+	if (atomic_read(&starget->eh_starget_state) == EH_NORMAL) { /* 第一次进入 */
+		atomic_set(&starget->eh_starget_state, EH_QUIESCE); /* 修改 target 状态 */
+		list_add_tail(&starget->starget_eh_siblings, &shost->eh_starget); /* 将该 target 挂到 host 上 */
 		starget->eh_queued = true;
 		need_wait = eh_scan_target_firstly(starget);
-	} else { // 并非第一次进入，即 atomic_read(&starget->eh_starget_state) == EH_QUIESCE，说明之前来过，但是 eh_to_target done 的条件不满足
+	} else { /* 并非第一次进入，即 atomic_read(&starget->eh_starget_state) == EH_QUIESCE，说明之前来过，但是 eh_to_target done 的条件不满足 */
 		need_wait = eh_scan_target_no_firstly(starget);
 	}
 
 	if (starget->total_sdevs == starget->sdev_failed && (atomic_read(&starget->eh_starget_state) == EH_QUIESCE)) {
 		/* 当 target 下面所有的 sdev 都 GG 的时候，target也应该迭代到 EH_SCHEDULED */
 		atomic_set(&starget->eh_starget_state, EH_SCHEDULED);
-		// channel 的 target failed++
+		/* channel 的 target failed++ */
 		schannel->starget_failed++;
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
+
+	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	if (need_wait)
 		return NEED_WAIT_IO_DONE;
@@ -779,8 +798,8 @@ static bool eh_scan_channel_firstly(struct scsi_channel *schannel)
 	*  1. 将其从 host 上拿下来，因为目前错误处理粒度是 channel
 	*  2. 阻塞所有 target 下所有 sdev 的 I/O
 	*/
-	// 遍历channel下的所有target，再遍历target下的全部 sdev，TODO 这个开销看着有点难受哦，一直在遍历
-	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) { // 遍历 channel 下的 target
+	/* 遍历channel下的所有target，再遍历target下的全部 sdev，TODO 这个开销看着有点难受哦，一直在遍历 */
+	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) { /* 遍历 channel 下的 target */
 		if (starget->eh_queued == true) {
 			list_del_init(&starget->starget_eh_siblings);
 			starget->eh_queued = false;
@@ -799,8 +818,10 @@ static bool eh_scan_channel_firstly(struct scsi_channel *schannel)
 	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
 		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
 		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
-		// host 的 host failed++
+		/* host 的 host failed++ */
 		shost->schannel_failed++;
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
 
 	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
@@ -825,8 +846,10 @@ static bool eh_scan_channel_no_firstly(struct scsi_channel *schannel)
 	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
 		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
 		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
-		// host 的 host failed++
+		/* host 的 host failed++ */
 		shost->schannel_failed++;
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
 
 	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
@@ -846,21 +869,24 @@ static enum eh_update_result update_eh_field_to_channel(struct scsi_channel *sch
 		return DONE;
 
 	if (atomic_read(&schannel->eh_schannel_state) == EH_NORMAL) {
-		atomic_set(&schannel->eh_schannel_state, EH_QUIESCE); // 修改 channel 状态
-		list_add_tail(&schannel->schannel_eh_siblings, &shost->eh_schannel); // 将该 channel 挂到 host 上
+		atomic_set(&schannel->eh_schannel_state, EH_QUIESCE); /* 修改 channel 状态 */
+		list_add_tail(&schannel->schannel_eh_siblings, &shost->eh_schannel); /* 将该 channel 挂到 host 上 */
 		schannel->eh_queued = true;
 		pr_err("%s queued %s\n", __func__, scsi_eh_locate_schannel(schannel));
 		need_wait = eh_scan_channel_firstly(schannel);
-	} else { // 并非第一次进入，即 atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE
+	} else { /* 并非第一次进入，即 atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE */
 		need_wait = eh_scan_channel_no_firstly(schannel);
 	}
 
 	if (schannel->total_stargets == schannel->starget_failed && (atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE)) {
 		/* 当 channel 下面所有的 target 都是 EH_SCHEDULED 的时候，channel 也应该迭代到 EH_SCHEDULED */
 		atomic_set(&schannel->eh_schannel_state, EH_SCHEDULED);
-		// host 的 host failed++
-		shost->schannel_failed++;
+		shost->schannel_failed++; /* host 的 host failed++ */
+		pr_err("%s: %s failed, schannel->starget_failed=%d\n",
+			 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
+
+	pr_err("%s %s need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
 
 	if (need_wait)
 		return NEED_WAIT_IO_DONE;
@@ -1394,12 +1420,26 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 		mutex_unlock(&sdev->state_mutex);
 		atomic_set(&sdev->eh_sdev_state, EH_QUIESCE);
 	}
+	pr_err("%s: %s vendor = %s, busy,scmd_failed(%d, %d)\n",
+		__func__, scsi_eh_locate_sdev(sdev), sdev->vendor, scsi_device_busy(sdev), sdev->scmd_failed);
 
 	if (sdev->scmd_failed == scsi_device_busy(sdev)) {
-		atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
 		starget->sdev_failed++;
 		pr_err("%s: %s failed totally!\n", __func__, scsi_eh_locate_sdev(sdev));
-		queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100); // 每一个 sdev 功德圆满后，都会尝试唤醒 checkpoint 去搞一波
+		/* 
+		 * 每一个 sdev 功德圆满后，都会尝试唤醒 checkpoint 去搞一波，但是后期的实现不是线程了，而是工作队列，所以这里不能无脑噻队列了
+		 * 有 2 种可能性
+		 * 	一种是等待 I/O 完成 —— 不会路过这个位置，也不会涉及新的work的到达
+		 * 	一种是等待错误处理超时完成 —— 超时逻辑一定会走到这里来，而且只要满足 EH_QUIESCE，那就说明大家都在等你。好像又弄错了，刚错的时候 eh 就已经变成 EH_QUIESCE
+		 * 那究竟应该如何区分是否拉起 eh worker 呢？
+		 * host 新增一个域，用于判断这个 checkpoint 是否真正流转 TODO
+		 */
+		BUG_ON(atomic_read(&sdev->eh_sdev_state) == EH_RUNNING || atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED);
+		if (!sdev->is_worker_waiting) {
+			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+			/* TODO 这里还有大量工作，即 checkpoint 的流转 */
+			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100);
+		}
 	}
 }
 
@@ -1415,6 +1455,7 @@ static void scsi_eh_recover_scmd(struct scsi_device *sdev, struct scsi_cmnd *scm
 static void scsi_eh_recover_sdev(struct scsi_device *sdev)
 {
 	atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
+	sdev->is_worker_waiting = false;
 	sdev->pfaction = OFFLINE_POST_FAULT;
 	sdev->eh_reset_level = EH_SDEV;
 	if (sdev->eh_queued) {
@@ -1603,6 +1644,7 @@ reset_fault:
 			pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_offline_sdev(sdev);
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			atomic_set(&sdev->eh_sdev_state, EH_RUNNING);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 		}
 	}
@@ -1737,6 +1779,7 @@ reset_fault:
 				pr_err("%s: %s finish eh reset, offline no idle sdevs!\n", __func__, scsi_eh_locate_starget(starget));
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			atomic_set(&starget->eh_starget_state, EH_RUNNING);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 		}
 	}
@@ -1880,6 +1923,7 @@ reset_fault:
 				pr_err("%s: %s finish eh reset, offline no idle sdevs!\n", __func__, scsi_eh_locate_schannel(schannel));
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
+			atomic_set(&schannel->eh_schannel_state, EH_RUNNING);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 		}
 	}
@@ -2054,16 +2098,20 @@ void scsi_eh_reset_worker(struct work_struct *work)
 	eh_host_statue_show(sdev);
 
 	switch(sdev->eh_reset_level){
-	case EH_SDEV: 
+	case EH_SDEV:
+		atomic_set(&sdev->eh_sdev_state, EH_RUNNING);
 		scsi_eh_sdev_reset(sdev);
 		break;
 	case EH_STARGET:
+		atomic_set(&starget->eh_starget_state, EH_RUNNING);
 		scsi_eh_starget_reset(sdev, starget);
 		break;
 	case EH_SCHANNEL:
+		atomic_set(&schannel->eh_schannel_state, EH_RUNNING);
 		scsi_eh_schannel_reset(sdev, starget, schannel);
 		break;
 	case EH_SHOST:
+		atomic_set(&shost->eh_shost_state, EH_RUNNING);
 		scsi_eh_shost_reset(sdev, starget, schannel, shost);
 		break;
 	}
