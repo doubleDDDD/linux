@@ -2124,6 +2124,7 @@ void scsi_eh_debug_worker(struct work_struct *work)
 	struct scsi_target *starget = sdev->sdev_target;
 	struct scsi_channel *schannel = sdev->schannel;
 	struct Scsi_Host *shost = sdev->host;
+	// struct request_queue *req = sdev->request_queue;
 
 	scsi_eh_locate_sdev(sdev);
 	scsi_eh_locate_starget(starget);
@@ -2131,22 +2132,25 @@ void scsi_eh_debug_worker(struct work_struct *work)
 	scsi_eh_locate_shost(shost);
 	pr_err("%s here!\n", __func__);
 
+	struct scsi_channel *_schannel;
+	struct scsi_target *_starget;
+	struct scsi_device *_sdev;
+
+	list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
+		list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
+			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
+				pr_err("%s: %s busy=%d, state=%s,iorequest_cnt=%d, iodone_cnt=%d, ioerr_cnt=%d, iotmo_cnt=%d\n",
+					 __func__, scsi_eh_locate_sdev(_sdev), scsi_device_busy(_sdev),
+					 scsi_device_show_state(_sdev->sdev_state), atomic_read(&_sdev->iorequest_cnt),
+					 atomic_read(&_sdev->iodone_cnt), atomic_read(&_sdev->ioerr_cnt), atomic_read(&_sdev->iotmo_cnt));
+			}
+		}
+	}
+
 	queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 
 	return;
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

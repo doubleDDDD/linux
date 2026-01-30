@@ -3557,13 +3557,27 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-//static bool scsih_bus_reset_success = false;
+static bool scsih_bus_reset_success = false;
 static int
 scsih_bus_reset(struct scsi_cmnd *scmd)
 {
-	// scsih_bus_reset_success = true;
-	// return SUCCESS;
-	return FAILED;
+	struct MPT3SAS_ADAPTER *ioc = shost_priv(scmd->device->host);
+	struct scsi_cmnd *_scmd;
+	struct scsiio_tracker *st;
+	u16 _smid = 0;
+
+	pr_err("%s attempting channel reset! scmd(0x%p)\n", __func__, scmd);
+	for (_smid = 1; _smid <= ioc->shost->can_queue; _smid++) {
+		_scmd = mpt3sas_scsih_scsi_lookup_get(ioc, _smid);
+		if (_scmd) {
+			st = scsi_cmd_priv(_scmd);
+			mpt3sas_base_free_smid(ioc, _smid);
+		}
+	}
+
+	scsih_bus_reset_success = true;
+	return SUCCESS;
+	//return FAILED;
 }
 
 static bool scsih_host_reset_success = false;
@@ -5328,11 +5342,20 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 			raid_device, mpi_request);
 
 	/* KIOXIA/SAMSUNG/BROADCOM */
-	if (!scsih_target_reset_success) {
+	if (!scsih_bus_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
 			return 0;
+			// mutex_lock(&scmd->device->state_mutex);
+			// scsi_device_set_state(scmd->device, SDEV_BLOCK);
+			// mutex_unlock(&scmd->device->state_mutex);
+
+			// mutex_lock(&scmd->device->state_mutex);
+			// scsi_device_set_state(scmd->device, SDEV_OFFLINE);
+			// mutex_unlock(&scmd->device->state_mutex);
+			// pr_err("%s offline 成功！\n", __func__);
+			// return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
 
