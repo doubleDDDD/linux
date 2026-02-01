@@ -464,38 +464,54 @@ static inline const char *scsi_device_show_state(enum scsi_device_state state);
 static void eh_host_statue_show(struct scsi_device *sdev)
 {
 	struct Scsi_Host *shost = sdev->host;
-	struct scsi_target *starget = sdev->sdev_target;
-	struct scsi_channel *schannel = sdev->schannel;
+	// struct scsi_target *starget = sdev->sdev_target;
+	// struct scsi_channel *schannel = sdev->schannel;
+	struct scsi_device *_sdev;
+	struct scsi_target *_starget;
+	struct scsi_channel *_schannel;
 
 	pr_err("\n");
 	pr_err("\n");
 	pr_err("\n");
-	pr_err("%s: sdev scmd_failed        =%d, sdev scsi_device_busy   =%d\n",
-		 __func__, sdev->scmd_failed, scsi_device_busy(sdev));
-	pr_err("%s: starget sdev_failed     =%d, starget total_sdevs     =%d\n",
-		 __func__, starget->sdev_failed, starget->total_sdevs);
-	pr_err("%s: schannel starget_failed =%d, schannel total_stargets =%d\n",
-		 __func__, schannel->starget_failed, schannel->total_stargets);
-	pr_err("%s: shost schannel_failed   =%d, shost total_channels    =%d\n",
-		 __func__, shost->schannel_failed, shost->total_channels);
-	pr_err("\n");
-	pr_err("%s: sdev eh state     =%s, sdev pfaction     =%s\n",
-		 __func__, scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)), post_fault_action_name(sdev->pfaction));
-	pr_err("%s: starget eh state  =%s, starget pfaction  =%s\n",
-		 __func__, scsi_eh_state_name(atomic_read(&starget->eh_starget_state)), post_fault_action_name(starget->pfaction));
-	pr_err("%s: schannel eh state =%s, schannel pfaction =%s\n",
-		 __func__, scsi_eh_state_name(atomic_read(&schannel->eh_schannel_state)), post_fault_action_name(schannel->pfaction));
-	pr_err("%s: shost eh state    =%s, shost pfaction    =%s\n",
-		 __func__, scsi_eh_state_name(atomic_read(&shost->eh_shost_state)), post_fault_action_name(shost->pfaction));
-	pr_err("\n");
-	pr_err("%s: sdev eh_queued     =%d\n",
-		 __func__, sdev->eh_queued);
-	pr_err("%s: starget eh_queued  =%d\n",
-		 __func__, starget->eh_queued);
-	pr_err("%s: schannel eh_queued =%d\n",
-		 __func__, schannel->eh_queued);
-	pr_err("\n");
-	pr_err("%s: sdev state is %s\n", __func__, scsi_device_show_state(sdev->sdev_state));
+	list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
+		list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
+			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
+				pr_err("%s: %s busy=%d,state=%s,eh_state=%s,pfaction=%s,eh_queued=%d,idle=%d\n",
+					 __func__,
+					 scsi_eh_locate_sdev(_sdev),
+					 scsi_device_busy(_sdev),
+					 scsi_device_show_state(_sdev->sdev_state),
+					 scsi_eh_state_name(atomic_read(&_sdev->eh_sdev_state)),
+					 post_fault_action_name(_sdev->pfaction),
+					 _sdev->eh_queued,
+					 _sdev->idle);
+			}
+			pr_err("%s: %s sdev_failed=%d,total_sdevs=%d,eh_state=%s,pfaction=%s,eh_queued=%d\n",
+					 __func__,
+					 scsi_eh_locate_starget(_starget),
+					 _starget->sdev_failed,
+					 _starget->total_sdevs,
+					 scsi_eh_state_name(atomic_read(&_starget->eh_starget_state)),
+					 post_fault_action_name(_starget->pfaction),
+					 _starget->eh_queued);
+		}
+		pr_err("%s: %s starget_failed=%d,total_stargets=%d,eh_state=%s,pfaction=%s,eh_queued=%d\n",
+				 __func__,
+				 scsi_eh_locate_schannel(_schannel),
+				 _schannel->starget_failed,
+				 _schannel->total_stargets,
+				 scsi_eh_state_name(atomic_read(&_schannel->eh_schannel_state)),
+				 post_fault_action_name(_schannel->pfaction),
+				 _schannel->eh_queued);
+	}
+
+	pr_err("%s: %s schannel_failed=%d,total_channels=%d,eh_state=%s,pfaction=%s\n",
+			__func__,
+			scsi_eh_locate_shost(shost),
+			shost->schannel_failed,
+			shost->total_channels,
+			scsi_eh_state_name(atomic_read(&shost->eh_shost_state)),
+			post_fault_action_name(shost->pfaction));
 	pr_err("\n");
 	pr_err("\n");
 	pr_err("\n");
@@ -987,11 +1003,11 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_target_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 			pr_err("%s update_eh_field_to_target need wait I/O done\n", __func__);
-			eh_host_statue_show(sdev);
+			// eh_host_statue_show(sdev);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 		} else {
 			pr_err("%s update_eh_field_to_target no need wait I/O done\n", __func__);
-			eh_host_statue_show(sdev);
+			// eh_host_statue_show(sdev);
 			starget->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_STARGET;
 			queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
@@ -1455,6 +1471,9 @@ static void scsi_eh_recover_scmd(struct scsi_device *sdev, struct scsi_cmnd *scm
 
 static void scsi_eh_recover_sdev(struct scsi_device *sdev)
 {
+	if (sdev->idle)
+		sdev->idle = false;
+
 	atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
 	sdev->is_worker_waiting = false;
 	sdev->pfaction = OFFLINE_POST_FAULT;
@@ -1507,6 +1526,16 @@ static void scsi_eh_offline_sdev(struct scsi_device *sdev)
 	pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
 }
 
+static void scsi_eh_make_sdev_running(struct scsi_device *sdev)
+{
+	mutex_lock(&sdev->state_mutex);
+	scsi_device_set_state(sdev, SDEV_RUNNING);
+	mutex_unlock(&sdev->state_mutex);
+	scsi_eh_recover_sdev(sdev);
+	blk_mq_run_hw_queues(sdev->request_queue, true);
+	scsi_rescan_device(sdev);
+}
+
 static void scsi_eh_send_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
 {
 	static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
@@ -1547,7 +1576,6 @@ static int scsi_eh_shost_total_sdevs(struct Scsi_Host *shost)
 
 	return total_sdevs;
 }
-
 
 static void eh_scsi_restart_operations(struct Scsi_Host *shost)
 {
@@ -1626,8 +1654,8 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 			}
 
 			pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(sdev));
-			scsi_eh_recover_sdev(sdev);
 			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+			scsi_eh_make_sdev_running(sdev);
 			pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__,
 				 scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
 		} else {
@@ -1720,6 +1748,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 					sdev_tur_complete_in_target++;
 					/* 这里只要有一个成功的，所有的 sdev，以及 starget 的状态都需要恢复，那怕是为了下一次的错误处理 */
 					scsi_eh_recover_scmd(_sdev, scmd);
+					scsi_eh_recover_sdev(_sdev);
 					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
 					pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
 						__func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
@@ -1739,10 +1768,10 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 		if (!sdev_tur_complete_in_target)
 			goto reset_fault;
 
-		/* 对超时的 sdev 予以处理 */
+		/* sdev 的二阶段处理 */
 		list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 			if (_sdev->idle) {
-				scsi_eh_recover_sdev(_sdev);
+				scsi_eh_make_sdev_running(_sdev);
 				continue;
 			}
 
@@ -1769,7 +1798,7 @@ reset_fault:
 			} else { /* 如果不是真的失败，idle 的设备保持不变，只离线确实出问题的设备 */
 				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 					if (_sdev->idle) {
-						scsi_eh_recover_sdev(_sdev);
+						scsi_eh_make_sdev_running(_sdev);
 						continue;
 					}
 
@@ -1859,6 +1888,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 						sdev_tur_complete_in_channel++;
 						/* 这里只要有一个成功的，所有的 sdev，以及 channel 的状态都需要恢复，那怕是为了下一次的错误处理 */
 						scsi_eh_recover_scmd(_sdev, scmd);
+						scsi_eh_recover_sdev(_sdev);
 						scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
 						pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
 							__func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
@@ -1880,8 +1910,10 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 
 		list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
 			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-				if (_sdev->idle)
+				if (_sdev->idle) {
+					scsi_eh_make_sdev_running(_sdev);
 					continue;
+				}
 
 				if (completion_done(&_sdev->eh_wait_tur_done))
 					continue;
@@ -1911,7 +1943,7 @@ reset_fault:
 				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						if (_sdev->idle) {
-							scsi_eh_recover_sdev(_sdev);
+							scsi_eh_make_sdev_running(_sdev);
 							continue;
 						}
 
@@ -1991,7 +2023,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 		sdev_tur_complete_in_host = 0;
 		while (true) {
 			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
-				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+				list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 						if (!_sdev->idle)
@@ -2028,10 +2060,12 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 			goto reset_fault;
 
 		list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
-			list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+			list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 				list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-					if (_sdev->idle)
+					if (_sdev->idle) {
+						scsi_eh_make_sdev_running(_sdev);
 						continue;
+					}
 
 					if (completion_done(&_sdev->eh_wait_tur_done))
 						continue;
@@ -2040,7 +2074,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 				}
 				scsi_eh_recover_starget(_starget); /* 恢复 target 状态 */
 			}
-			scsi_eh_recover_schannel(schannel); /* 恢复 schannel 状态 */
+			scsi_eh_recover_schannel(_schannel); /* 恢复 schannel 状态 */
 		}
 		scsi_eh_recover_shost(shost); /* 恢复 shost 状态 */
 		pr_err("%s: %s finish eh reset!\n", __func__, scsi_eh_locate_shost(shost));
@@ -2051,7 +2085,7 @@ reset_fault:
 		if (real_reset_failure) {
 			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 				list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
-					list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
+					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						scsi_eh_offline_sdev(_sdev);
 					}
@@ -2063,10 +2097,10 @@ reset_fault:
 			pr_err("%s: %s finish eh reset, offline all sdevs!\n", __func__, scsi_eh_locate_shost(shost));
 		} else {
 			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
-				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
+				list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						if (_sdev->idle) {
-							scsi_eh_recover_sdev(_sdev);
+							scsi_eh_make_sdev_running(_sdev);
 							continue;
 						}
 
@@ -2121,16 +2155,14 @@ void scsi_eh_reset_worker(struct work_struct *work)
 void scsi_eh_debug_worker(struct work_struct *work) 
 {
 	struct scsi_device *sdev = container_of(work, struct scsi_device, eh_debug_work.work);
-	struct scsi_target *starget = sdev->sdev_target;
-	struct scsi_channel *schannel = sdev->schannel;
+	// struct scsi_target *starget = sdev->sdev_target;
+	// struct scsi_channel *schannel = sdev->schannel;
 	struct Scsi_Host *shost = sdev->host;
-	// struct request_queue *req = sdev->request_queue;
-
-	scsi_eh_locate_sdev(sdev);
-	scsi_eh_locate_starget(starget);
-	scsi_eh_locate_schannel(schannel);
-	scsi_eh_locate_shost(shost);
-	pr_err("%s here!\n", __func__);
+	// struct request *req;
+	// scsi_eh_locate_sdev(sdev);
+	// scsi_eh_locate_starget(starget);
+	// scsi_eh_locate_schannel(schannel);
+	// scsi_eh_locate_shost(shost);
 
 	struct scsi_channel *_schannel;
 	struct scsi_target *_starget;
@@ -2139,10 +2171,11 @@ void scsi_eh_debug_worker(struct work_struct *work)
 	list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 		list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-				pr_err("%s: %s busy=%d, state=%s,iorequest_cnt=%d, iodone_cnt=%d, ioerr_cnt=%d, iotmo_cnt=%d\n",
+				pr_err("%s: %s busy=%d,state=%s,eh_state=%s,iorequest_cnt=%d,iodone_cnt=%d,ioerr_cnt=%d,iotmo_cnt=%d\n",
 					 __func__, scsi_eh_locate_sdev(_sdev), scsi_device_busy(_sdev),
-					 scsi_device_show_state(_sdev->sdev_state), atomic_read(&_sdev->iorequest_cnt),
-					 atomic_read(&_sdev->iodone_cnt), atomic_read(&_sdev->ioerr_cnt), atomic_read(&_sdev->iotmo_cnt));
+					 scsi_device_show_state(_sdev->sdev_state), scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)),
+					 atomic_read(&_sdev->iorequest_cnt), atomic_read(&_sdev->iodone_cnt), atomic_read(&_sdev->ioerr_cnt),
+					 atomic_read(&_sdev->iotmo_cnt));
 			}
 		}
 	}
@@ -2151,7 +2184,6 @@ void scsi_eh_debug_worker(struct work_struct *work)
 
 	return;
 }
-
 
 
 
