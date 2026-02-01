@@ -977,7 +977,7 @@ void scsi_eh_check_point(struct work_struct *work)
 	const struct scsi_host_template *hostt = shost->hostt;
 
 	pr_err("%s check_point wakeup!\n", __func__);
-	queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
+	// queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 	/* 底层驱动实现 handler 的可能性不同，这里需要评估策略，最简单的就是一个大case，根据底层不同的实现先分开 */
 	if ((hostt->eh_device_reset_handler) && (!hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler && !hostt->eh_host_reset_handler)) {
 		/* ::: 异常 sdev 功德圆满 GG 后，判断其所属 target 是否健康：
@@ -1514,13 +1514,17 @@ static void scsi_eh_recover_shost(struct Scsi_Host *shost)
 	pr_err("%s: %s recover eh state!\n", __func__, scsi_eh_locate_shost(shost));
 }
 
-static void scsi_eh_offline_sdev(struct scsi_device *sdev)
+static void scsi_eh_offline_sdev(struct scsi_device *sdev, bool need_run_hw_queue)
 {
-	scsi_eh_recover_sdev(sdev);
-
 	mutex_lock(&sdev->state_mutex);
 	scsi_device_set_state(sdev, SDEV_OFFLINE);
 	mutex_unlock(&sdev->state_mutex);
+
+	if (sdev->idle && need_run_hw_queue)
+		blk_mq_run_hw_queues(sdev->request_queue, true);
+
+	scsi_eh_recover_sdev(sdev);
+
 	pr_err("%s: %s offline!\n", __func__, scsi_eh_locate_sdev(sdev));
 	scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
 	pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
@@ -1671,7 +1675,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 reset_fault:
 		if (sdev->pfaction == OFFLINE_POST_FAULT) {
 			pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(sdev));
-			scsi_eh_offline_sdev(sdev);
+			scsi_eh_offline_sdev(sdev, false);
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&sdev->eh_sdev_state, EH_RUNNING);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -1778,7 +1782,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 			if (completion_done(&_sdev->eh_wait_tur_done))
 				continue;
 
-			scsi_eh_offline_sdev(_sdev);
+			scsi_eh_offline_sdev(_sdev, false); /* tur 超时的 sdev */
 		}
 		scsi_eh_recover_starget(starget); /* 恢复 starget 状态 */
 		pr_err("%s: %s finish eh reset!\n", __func__, scsi_eh_locate_starget(starget));
@@ -1791,7 +1795,7 @@ reset_fault:
 			if (real_reset_failure) { /* 如果是真的失败了，那几全部离线，包括可能的 idel sdev */
 				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 					pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-					scsi_eh_offline_sdev(_sdev);
+					scsi_eh_offline_sdev(_sdev, true);
 				}
 				scsi_eh_recover_starget(starget);
 				pr_err("%s: %s finish eh reset, offline all sdevs!\n", __func__, scsi_eh_locate_starget(starget));
@@ -1803,7 +1807,7 @@ reset_fault:
 					}
 
 					pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-					scsi_eh_offline_sdev(_sdev);
+					scsi_eh_offline_sdev(_sdev, false);
 				}
 				scsi_eh_recover_starget(starget);
 				pr_err("%s: %s finish eh reset, offline no idle sdevs!\n", __func__, scsi_eh_locate_starget(starget));
@@ -1918,7 +1922,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 				if (completion_done(&_sdev->eh_wait_tur_done))
 					continue;
 
-				scsi_eh_offline_sdev(_sdev);
+				scsi_eh_offline_sdev(_sdev, false);
 			}
 			scsi_eh_recover_starget(_starget); /* 恢复 starget 状态 */
 		}
@@ -1933,7 +1937,7 @@ reset_fault:
 				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-						scsi_eh_offline_sdev(_sdev);
+						scsi_eh_offline_sdev(_sdev, true);
 					}
 					scsi_eh_recover_starget(_starget);
 				}
@@ -1948,7 +1952,7 @@ reset_fault:
 						}
 
 						pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-						scsi_eh_offline_sdev(_sdev);
+						scsi_eh_offline_sdev(_sdev, false);
 					}
 					scsi_eh_recover_starget(_starget);
 				}
@@ -2070,7 +2074,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 					if (completion_done(&_sdev->eh_wait_tur_done))
 						continue;
 
-					scsi_eh_offline_sdev(_sdev);
+					scsi_eh_offline_sdev(_sdev, false);
 				}
 				scsi_eh_recover_starget(_starget); /* 恢复 target 状态 */
 			}
@@ -2087,7 +2091,7 @@ reset_fault:
 				list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
 						pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-						scsi_eh_offline_sdev(_sdev);
+						scsi_eh_offline_sdev(_sdev, true);
 					}
 					scsi_eh_recover_starget(_starget);
 				}
@@ -2105,7 +2109,7 @@ reset_fault:
 						}
 
 						pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
-						scsi_eh_offline_sdev(_sdev);
+						scsi_eh_offline_sdev(_sdev, false);
 					}
 					scsi_eh_recover_starget(_starget);
 				}

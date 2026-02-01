@@ -3463,8 +3463,8 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
  out:
 	sdev_printk(KERN_INFO, scmd->device, "device reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
-	if (r == SUCCESS)
-		scsih_dev_reset_success = true;
+	// if (r == SUCCESS)
+	// 	scsih_dev_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -3474,7 +3474,7 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_target_reset_success = false;
+//static bool scsih_target_reset_success = false;
 /**
  * scsih_target_reset - eh threads main target reset routine
  * @scmd: pointer to scsi command object
@@ -3547,8 +3547,8 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	starget_printk(KERN_INFO, starget, "target reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
 
-	if (r == SUCCESS)
-		scsih_target_reset_success = true;
+	// if (r == SUCCESS)
+	// 	scsih_target_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -3557,28 +3557,28 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_bus_reset_success = false;
-static int
-scsih_bus_reset(struct scsi_cmnd *scmd)
-{
-	struct MPT3SAS_ADAPTER *ioc = shost_priv(scmd->device->host);
-	struct scsi_cmnd *_scmd;
-	struct scsiio_tracker *st;
-	u16 _smid = 0;
+// static bool scsih_bus_reset_success = false;
+// static int
+// scsih_bus_reset(struct scsi_cmnd *scmd)
+// {
+// 	struct MPT3SAS_ADAPTER *ioc = shost_priv(scmd->device->host);
+// 	struct scsi_cmnd *_scmd;
+// 	struct scsiio_tracker *st;
+// 	u16 _smid = 0;
 
-	pr_err("%s attempting channel reset! scmd(0x%p)\n", __func__, scmd);
-	for (_smid = 1; _smid <= ioc->shost->can_queue; _smid++) {
-		_scmd = mpt3sas_scsih_scsi_lookup_get(ioc, _smid);
-		if (_scmd) {
-			st = scsi_cmd_priv(_scmd);
-			mpt3sas_base_free_smid(ioc, _smid);
-		}
-	}
+// 	pr_err("%s attempting channel reset! scmd(0x%p)\n", __func__, scmd);
+// 	for (_smid = 1; _smid <= ioc->shost->can_queue; _smid++) {
+// 		_scmd = mpt3sas_scsih_scsi_lookup_get(ioc, _smid);
+// 		if (_scmd) {
+// 			st = scsi_cmd_priv(_scmd);
+// 			mpt3sas_base_free_smid(ioc, _smid);
+// 		}
+// 	}
 
-	scsih_bus_reset_success = true;
-	return SUCCESS;
-	//return FAILED;
-}
+// 	// scsih_bus_reset_success = true;
+// 	return SUCCESS;
+// 	// return FAILED;
+// }
 
 static bool scsih_host_reset_success = false;
 /**
@@ -5342,20 +5342,11 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 			raid_device, mpi_request);
 
 	/* KIOXIA/SAMSUNG/BROADCOM */
-	if (!scsih_bus_reset_success) {
+	if (!scsih_dev_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
 			return 0;
-			// mutex_lock(&scmd->device->state_mutex);
-			// scsi_device_set_state(scmd->device, SDEV_BLOCK);
-			// mutex_unlock(&scmd->device->state_mutex);
-
-			// mutex_lock(&scmd->device->state_mutex);
-			// scsi_device_set_state(scmd->device, SDEV_OFFLINE);
-			// mutex_unlock(&scmd->device->state_mutex);
-			// pr_err("%s offline 成功！\n", __func__);
-			// return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
 
@@ -12061,9 +12052,9 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.scan_start			= scsih_scan_start,
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
-	//.eh_device_reset_handler	= scsih_dev_reset,
+	.eh_device_reset_handler	= scsih_dev_reset,
 	//.eh_target_reset_handler	= scsih_target_reset,
-	.eh_bus_reset_handler		= scsih_bus_reset,
+	//.eh_bus_reset_handler		= scsih_bus_reset,
 	//.eh_host_reset_handler	= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
