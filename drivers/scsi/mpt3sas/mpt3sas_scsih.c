@@ -3463,8 +3463,8 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
  out:
 	sdev_printk(KERN_INFO, scmd->device, "device reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
-	// if (r == SUCCESS)
-	// 	scsih_dev_reset_success = true;
+	if (r == SUCCESS)
+		scsih_dev_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -3607,8 +3607,8 @@ scsih_host_reset(struct scsi_cmnd *scmd)
 out:
 	ioc_info(ioc, "host reset: %s scmd(0x%p)\n",
 		 r == SUCCESS ? "SUCCESS" : "FAILED", scmd);
-	if (r == SUCCESS)
-		scsih_host_reset_success = true;
+	// if (r == SUCCESS)
+	// 	scsih_host_reset_success = true;
 
 	return r;
 }
@@ -5342,7 +5342,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 			raid_device, mpi_request);
 
 	/* KIOXIA/SAMSUNG/BROADCOM */
-	if (!scsih_dev_reset_success) {
+	if (!scsih_host_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
@@ -12052,10 +12052,10 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.scan_start			= scsih_scan_start,
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
-	.eh_device_reset_handler	= scsih_dev_reset,
+	//.eh_device_reset_handler	= scsih_dev_reset,
 	//.eh_target_reset_handler	= scsih_target_reset,
 	//.eh_bus_reset_handler		= scsih_bus_reset,
-	//.eh_host_reset_handler	= scsih_host_reset,
+	.eh_host_reset_handler	= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,
