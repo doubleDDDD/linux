@@ -170,6 +170,7 @@ struct scsi_device {
 	struct scsi_eh_save *ses;
 	bool idle;
 	bool is_worker_waiting;
+	bool reset_tur_wait_timeout_done;
 	/**********************************************/
 
 	atomic_t restarts;
