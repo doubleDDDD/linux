@@ -556,7 +556,7 @@ static bool sdev_forward_progress_lost(struct scsi_device *sdev)
 static enum sentity_state sdev_is_healthy(struct scsi_device *sdev)
 {
 	/* 1. 优先检查状态。如果状态已经改变了，那 GG 了；但是该状态无法检查正在 GG 的 sdev，所以就有了下面的步骤 */
-	if (!atomic_read(&sdev->eh_sdev_state))
+	if (atomic_read(&sdev->eh_sdev_state))
 		return SENTITY_DEV_FAULT; /* GG */
 
 	/* 2. 再检查是否有活跃的 I/O */
@@ -582,12 +582,12 @@ static enum sentity_state target_is_healthy(struct scsi_target *starget)
 	struct scsi_device *sdev;
 
 	/* 1. 先检查 EH 相关的状态；如果状态已经 GG 了，那就 GG；如果该 target 还在 GG 的路上，就依赖下面 */
-	if (!atomic_read(&starget->eh_starget_state))
+	if (atomic_read(&starget->eh_starget_state))
 		return SENTITY_FAULT;
 
 	/* 2. 再通过遍历的方式确定漏网之鱼 */
 	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
-		if (sdev_is_healthy(sdev))
+		if (sdev_is_healthy(sdev) == SENTITY_DEV_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
@@ -602,11 +602,11 @@ static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
 {
 	struct scsi_target *starget;
 
-	if (!atomic_read(&schannel->eh_schannel_state))
+	if (atomic_read(&schannel->eh_schannel_state))
 		return SENTITY_FAULT;
 
 	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) {
-		if (target_is_healthy(starget))
+		if (target_is_healthy(starget) == SENTITY_DEV_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
@@ -621,14 +621,14 @@ static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
 {
 	struct scsi_channel *schannel;
 
-	if (!atomic_read(&shost->eh_shost_state))
+	if (atomic_read(&shost->eh_shost_state))
 		return SENTITY_FAULT;
 
 	if (scsi_host_in_recovery(shost))
 		return SENTITY_FAULT;
 
 	list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
-		if (channel_is_healthy(schannel))
+		if (channel_is_healthy(schannel) == SENTITY_DEV_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
@@ -1290,7 +1290,7 @@ void scsi_eh_check_point(struct work_struct *work)
 				sdev->eh_reset_level = EH_SHOST;
 				queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
 			}
-			} else {
+		} else {
 			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			} else {
@@ -1800,10 +1800,11 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 
 			if (completion_done(&_sdev->eh_wait_tur_done))
 				continue;
-			
+
 			scsi_eh_recover_scmd(_sdev, _scmd);
 			scsi_eh_offline_sdev(_sdev, false); /* tur 超时的 sdev */
 		}
+
 		scsi_eh_recover_starget(starget); /* 恢复 starget 状态 */
 		pr_err("%s: %s finish eh reset!\n", __func__, scsi_eh_locate_starget(starget));
 	} else {
