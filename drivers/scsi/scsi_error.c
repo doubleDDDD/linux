@@ -605,10 +605,9 @@ static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
 	if (atomic_read(&schannel->eh_schannel_state))
 		return SENTITY_FAULT;
 
-	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) {
-		if (target_is_healthy(starget) == SENTITY_DEV_RUNNING)
+	list_for_each_entry(starget, &schannel->targets, same_channel_siblings)
+		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING)
 			return SENTITY_ANY_RUNNING;
-	}
 
 	return SENTITY_UNCERTAIN;
 }
@@ -628,7 +627,7 @@ static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
 		return SENTITY_FAULT;
 
 	list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
-		if (channel_is_healthy(schannel) == SENTITY_DEV_RUNNING)
+		if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
