@@ -1577,13 +1577,36 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 		 * 	一种是等待 I/O 完成 —— 不会路过这个位置，也不会涉及新的work的到达
 		 * 	一种是等待错误处理超时完成 —— 超时逻辑一定会走到这里来，而且只要满足 EH_QUIESCE，那就说明大家都在等你。好像又弄错了，刚错的时候 eh 就已经变成 EH_QUIESCE
 		 * 那究竟应该如何区分是否拉起 eh worker 呢？
-		 * host 新增一个域，用于判断这个 checkpoint 是否真正流转 TODO
+		 * host 新增一个域，用于判断这个 checkpoint 是否真正流转
 		 */
 		BUG_ON(atomic_read(&sdev->eh_sdev_state) == EH_RUNNING || atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED);
-		if (!sdev->is_worker_waiting) {
-			atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
-			/* TODO 这里还有大量工作，即 checkpoint 的流转 */
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100);
+		if (!sdev->is_worker_waiting) { /* 如果当前的 sdev 已经被上一个 sequence 接管，那自然无需做额外的工作 */
+			/*
+			 * 1. 现在 GG 的 sdev 可能依然是上一个 work sequence（A）的延续，假设 A 触发了 reset 失败后再升级的逻辑。那么由 A 拉起的 work sequence 就会重复
+			 * 2. 所以 A 不应该轻易拉起这个 checkpoint，最直观的解法：
+			 * 	等上一个 work sequence 结束（即所有的 work sequence 都是严格串行的）；可能存在潜在的时间浪费；
+			 * 3. 追求效率的解法
+			 * 	在明确 work sequence 可以相互独立后，后一个 work sequence 就随之启动；尽管底层驱动 reset 的位置会互斥，但是可以最快，但是这个岂不是会造成可能潜在的 reset 超时
+			 * 4. 还是应该精细化控制
+			 * 	保持严格串行，在新的设计实现中，最后一个 reset 完成或超时后才可以拉起下一个 work sequence
+			 */
+			/*
+			 * 在 sdev 未被接管的情况下，存在一种可能性，reset 失败后的升级（引入了一个新的数据结构 struct scsi_eh_work_sequence）
+			 */
+			if (shost->eh_work_sequence == NULL) { /* 纯粹的第一个 */
+				shost->eh_work_sequence = kzalloc(sizeof(struct scsi_eh_work_sequence), GFP_KERNEL);
+				BUG_ON(!shost->eh_work_sequence);
+				shost->eh_work_sequence->prev_eh_work_seq= NULL;
+				shost->eh_work_sequence->next_eh_work_seq = NULL;
+				atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100);
+			} else {
+				/*
+				 * 存在 eh_work_sequence，判断 eh_work_sequence 的进度，即 end reset 前 or reset 后
+				 * 如果是reset前，那么这个 sdev 就得等，如果是 end reset 之后，那就直接拉起新的 eh_work_sequence，判断
+				 */
+				// TODO
+			}
 		}
 	}
 }

@@ -537,6 +537,11 @@ enum scsi_host_state {
 	SHOST_DEL_RECOVERY,
 };
 
+struct scsi_eh_work_sequence {
+	struct scsi_eh_work_sequence *prev_eh_work_seq;
+	struct scsi_eh_work_sequence *next_eh_work_seq;
+};
+
 struct Scsi_Host {
 	/*
 	 * __devices is protected by the host_lock, but you should
@@ -566,6 +571,7 @@ struct Scsi_Host {
 	enum post_fault_action pfaction;
 	unsigned int schannel_failed;
 	unsigned int total_channels;
+	struct scsi_eh_work_sequence *eh_work_sequence;
 	/****************************************************/
 
 	struct mutex		scan_mutex;/* serialize scanning activity */
