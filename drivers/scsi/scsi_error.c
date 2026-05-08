@@ -215,8 +215,8 @@ out:
 	list_del_init(&scmd->eh_entry);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
-	// scsi_eh_scmd_add(scmd);
-	scsi_eh_scmd_add_to_sdev(scmd);
+	scsi_eh_scmd_add(scmd);
+	//scsi_eh_scmd_add_to_sdev(scmd);
 }
 
 /**
@@ -304,6 +304,8 @@ void scsi_eh_scmd_add(struct scsi_cmnd *scmd)
 
 	WARN_ON_ONCE(!shost->ehandler);
 	WARN_ON_ONCE(!test_bit(SCMD_STATE_INFLIGHT, &scmd->state));
+
+	pr_err("%s linux-EH/deadline-EH 计时开始\n", __func__);
 
 	spin_lock_irqsave(shost->host_lock, flags);
 	if (scsi_host_set_state(shost, SHOST_RECOVERY)) {
@@ -1555,6 +1557,8 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 	struct scsi_device *sdev = scmd->device;
 	struct scsi_target *starget = sdev->sdev_target;
 
+	pr_err("%s BC-EH 计时开始\n", __func__);
+
 	sdev->scmd_failed++;
 	list_add_tail(&scmd->eh_entry, &sdev->dev_eh_cmd_q);
 	if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL) {
@@ -2348,8 +2352,8 @@ enum blk_eh_timer_return scsi_timeout(struct request *req)
 	atomic_inc(&scmd->device->iodone_cnt);
 	if (scsi_abort_command(scmd) != SUCCESS) {
 		set_host_byte(scmd, DID_TIME_OUT);
-		//scsi_eh_scmd_add(scmd);
-		scsi_eh_scmd_add_to_sdev(scmd);
+		scsi_eh_scmd_add(scmd);
+		//scsi_eh_scmd_add_to_sdev(scmd);
 	}
 
 	return BLK_EH_DONE;
@@ -3399,9 +3403,12 @@ static int scsi_eh_tur(struct scsi_cmnd *scmd)
 	int retry_cnt = 1;
 	enum scsi_disposition rtn;
 
+	pr_err("%s tur开始\n", __func__);
+
 retry_tur:
 	rtn = scsi_send_eh_cmnd(scmd, tur_command, 6,
 				scmd->device->eh_timeout, 0);
+	pr_err("%s 命令成功 rtn=0x%x\n", __func__, rtn);
 
 	SCSI_LOG_ERROR_RECOVERY(3, scmd_printk(KERN_INFO, scmd,
 		"%s return: %x\n", __func__, rtn));
@@ -3606,6 +3613,7 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 			sdev_printk(KERN_INFO, sdev,
 				     "%s: Sending BDR\n", current->comm));
 		rtn = scsi_try_bus_device_reset(bdr_scmd);
+		pr_err("%s what is rtn=%d\n", __func__, rtn);
 		if (rtn == SUCCESS || rtn == FAST_IO_FAIL) {
 			if (!scsi_device_online(sdev) ||
 			    rtn == FAST_IO_FAIL ||

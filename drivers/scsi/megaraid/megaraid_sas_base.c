@@ -1775,7 +1775,6 @@ out_return_cmd:
 	return SCSI_MLQUEUE_HOST_BUSY;
 }
 
-
 /**
  * megasas_queue_command -	Queue entry point
  * @shost:			adapter SCSI host
@@ -2937,6 +2936,8 @@ static enum scsi_timeout_action megasas_reset_timer(struct scsi_cmnd *scmd)
 	struct megasas_instance *instance;
 	unsigned long flags;
 
+	return SCSI_EH_NOT_HANDLED;
+
 	if (time_after(jiffies, scmd->jiffies_at_alloc +
 				(scmd_timeout * 2) * HZ)) {
 		return SCSI_EH_NOT_HANDLED;
@@ -3082,10 +3083,11 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 	if (instance->adapter_type == MFI_SERIES) {
 		ret = megasas_generic_reset(scmd);
 	} else {
-		megasas_dump_fusion_io(scmd);
+		// megasas_dump_fusion_io(scmd);
 		ret = megasas_reset_fusion(scmd->device->host,
 				SCSIIO_TIMEOUT_OCR);
 	}
+	pr_err("%s host reset done!\n", __func__);
 
 	return ret;
 }

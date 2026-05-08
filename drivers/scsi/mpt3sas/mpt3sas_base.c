@@ -5456,6 +5456,10 @@ out:
 	    "MaxWidePortQD: 0x%x MaxNarrowPortQD: 0x%x MaxSataQD: 0x%x MaxNvmeQD: 0x%x\n",
 	    ioc->max_wideport_qd, ioc->max_narrowport_qd,
 	    ioc->max_sata_qd, ioc->max_nvme_qd));
+	pr_err(
+	    "MaxWidePortQD: 0x%x MaxNarrowPortQD: 0x%x MaxSataQD: 0x%x MaxNvmeQD: 0x%x\n",
+	    ioc->max_wideport_qd, ioc->max_narrowport_qd,
+	    ioc->max_sata_qd, ioc->max_nvme_qd);
 	return rc;
 }
 

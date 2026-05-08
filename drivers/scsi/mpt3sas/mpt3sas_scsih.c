@@ -3099,6 +3099,9 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	dtmprintk(ioc,
 		  ioc_info(ioc, "sending tm: handle(0x%04x), task_type(0x%02x), smid(%d), timeout(%d), tr_method(0x%x)\n",
 			   handle, type, smid_task, timeout, tr_method));
+
+	ioc_info(ioc, "sending tm: handle(0x%04x), task_type(0x%02x), smid(%d), timeout(%d), tr_method(0x%x)\n",
+			   handle, type, smid_task, timeout, tr_method);
 	ioc->tm_cmds.status = MPT3_CMD_PENDING;
 	mpi_request = mpt3sas_base_get_msg_frame(ioc, smid);
 	ioc->tm_cmds.smid = smid;
@@ -3116,10 +3119,10 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	init_completion(&ioc->tm_cmds.done);
 	ioc->put_smid_hi_priority(ioc, smid, msix_task);
 
-	if (type == MPI2_SCSITASKMGMT_TASKTYPE_ABORT_TASK
-			|| type == MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET
-			|| type == MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET)
-			msleep(5000); /* 模拟10s的超时而且不触发host直接reset */
+	// if (type == MPI2_SCSITASKMGMT_TASKTYPE_ABORT_TASK
+	// 		|| type == MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET
+	// 		|| type == MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET)
+	// 		msleep(5000); /* 模拟10s的超时而且不触发host直接reset */
 
 	wait_for_completion_timeout(&ioc->tm_cmds.done, timeout*HZ);
 
@@ -3460,7 +3463,7 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 		tr_timeout, tr_method);
 	/* Check for busy commands after reset */
 	// pr_err("%s r=%d if busy=%d\n", __func__, r, scsi_device_busy(scmd->device));
-	r = FAILED;
+	// r = FAILED;
  out:
 	sdev_printk(KERN_INFO, scmd->device, "device reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
@@ -3576,7 +3579,7 @@ scsih_bus_reset(struct scsi_cmnd *scmd)
 		}
 	}
 
-	// scsih_bus_reset_success = true;
+	scsih_bus_reset_success = true;
 	return SUCCESS;
 	// return FAILED;
 }
@@ -5208,8 +5211,8 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 
 	mq_ctx = rq->mq_ctx;
 	mq_hctx = rq->mq_hctx;
-	if (ioc->logging_level & MPT_DEBUG_SCSI)
-		scsi_print_command(scmd);
+	//if (ioc->logging_level & MPT_DEBUG_SCSI)
+	scsi_print_command(scmd);
 	//dump_stack();
 	//pr_err("%s nr_ctx=%d, queue_num=%d\n", __func__, mq_hctx->nr_ctx, mq_hctx->queue_num);
 
@@ -5344,7 +5347,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 			raid_device, mpi_request);
 
 	/* KIOXIA/SAMSUNG/BROADCOM */
-	if (!scsih_bus_reset_success) {
+	if (!scsih_dev_reset_success) {
 		overtimecount++;
 		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
 			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
@@ -12054,7 +12057,7 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.scan_start			= scsih_scan_start,
 	.change_queue_depth		= scsih_change_queue_depth,
 	.eh_abort_handler		= scsih_abort,
-	// .eh_device_reset_handler	= scsih_dev_reset,
+	.eh_device_reset_handler	= scsih_dev_reset,
 	.eh_target_reset_handler	= scsih_target_reset,
 	.eh_bus_reset_handler	= scsih_bus_reset,
 	.eh_host_reset_handler	= scsih_host_reset,
