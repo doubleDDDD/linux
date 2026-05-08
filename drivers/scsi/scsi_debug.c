@@ -350,6 +350,8 @@ enum sdebug_err_type {
 					/* scsi_debug_abort() */
 	ERR_LUN_RESET_FAILED	= 4,	/* control return FAILED from */
 					/* scsi_debug_device_reseLUN_RESET_FAILEDt() */
+	ERR_BUS_RESET_FAILED    = 5,    /* control return FAILED from */
+									/* scsi_debug_bus_reset() */
 };
 
 struct sdebug_err_inject {
@@ -1121,6 +1123,7 @@ static int sdebug_error_show(struct seq_file *m, void *p)
 		case ERR_TMOUT_CMD:
 		case ERR_ABORT_CMD_FAILED:
 		case ERR_LUN_RESET_FAILED:
+		case ERR_BUS_RESET_FAILED:
 			seq_printf(m, "%d\t%d\t0x%x\n", err->type, err->cnt,
 				err->cmd);
 		break;
@@ -1179,6 +1182,7 @@ static ssize_t sdebug_error_write(struct file *file, const char __user *ubuf,
 	case ERR_TMOUT_CMD:
 	case ERR_ABORT_CMD_FAILED:
 	case ERR_LUN_RESET_FAILED:
+	case ERR_BUS_RESET_FAILED:
 		if (sscanf(buf, "%d %d %hhx", &inject->type, &inject->cnt,
 			   &inject->cmd) != 3)
 			goto out_error;
@@ -6910,6 +6914,21 @@ static void scsi_tape_reset_clear(struct sdebug_dev_info *devip)
 	devip->tape_pending_nbr_partitions = -1;
 	/* Don't reset partitioning? */
 }
+static void sdebug_clear_tmout_abort_injects(struct scsi_device *sdp)
+{
+	struct sdebug_dev_info *devip = sdp->hostdata;
+	struct sdebug_err_inject *err;
+
+	if (!devip)
+		return;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
+			if (err->type == ERR_TMOUT_CMD || err->type == ERR_ABORT_CMD_FAILED)
+					WRITE_ONCE(err->cnt, 0);
+	}
+	rcu_read_unlock();
+}
 
 static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 {
@@ -6938,6 +6957,8 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 		return FAILED;
 	}
 
+	sdebug_clear_tmout_abort_injects(sdp);
+
 	pr_err("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
@@ -6953,6 +6974,27 @@ static int sdebug_fail_target_reset(struct scsi_cmnd *cmnd)
 		return targetip->reset_fail;
 
 	return 0;
+}
+
+static void sdebug_clear_tmout_abort_lunreset_on_target(struct scsi_device *sdp)
+{
+	struct sdebug_host_info *sdbg_host = shost_to_sdebug_host(sdp->host);
+	struct sdebug_dev_info *devip;
+	struct sdebug_err_inject *err;
+
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		if (devip->channel != sdp->channel || devip->target != sdp->id)
+			continue;
+
+		rcu_read_lock();
+		list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
+			if (err->type == ERR_TMOUT_CMD ||
+				err->type == ERR_ABORT_CMD_FAILED ||
+				err->type == ERR_LUN_RESET_FAILED)
+					WRITE_ONCE(err->cnt, 0);
+		}
+		rcu_read_unlock();
+	}
 }
 
 static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
@@ -6987,7 +7029,59 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 		return FAILED;
 	}
 
+	sdebug_clear_tmout_abort_lunreset_on_target(sdp);
+
 	return SUCCESS;
+}
+
+static void sdebug_clear_tmout_abort_lunreset_on_channel(struct scsi_device *sdp)
+{
+	struct sdebug_host_info *sdbg_host = shost_to_sdebug_host(sdp->host);
+	struct sdebug_dev_info *devip;
+	struct sdebug_err_inject *err;
+
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		if (devip->channel != sdp->channel)
+			continue;
+
+		rcu_read_lock();
+		list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
+			if (err->type == ERR_TMOUT_CMD ||
+				err->type == ERR_ABORT_CMD_FAILED ||
+				err->type == ERR_LUN_RESET_FAILED)
+					WRITE_ONCE(err->cnt, 0);
+		}
+		rcu_read_unlock();
+	}
+}
+
+static int sdebug_fail_bus_reset(struct scsi_cmnd *cmnd)
+{
+	struct scsi_device *sdp = cmnd->device;
+	struct sdebug_host_info *sdbg_host = shost_to_sdebug_host(sdp->host);
+	struct sdebug_dev_info *devip;
+	struct sdebug_err_inject *err;
+	unsigned char *cmd = cmnd->cmnd;
+	int ret = 0;
+
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		if (devip->channel != sdp->channel)
+			continue;
+
+		rcu_read_lock();
+		list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
+			if (err->type == ERR_BUS_RESET_FAILED && (err->cmd == cmd[0] || err->cmd == 0xff)) {
+				ret = !!err->cnt;
+				if (err->cnt < 0)
+						err->cnt++;
+				rcu_read_unlock();
+				return ret;
+			}
+		}
+		rcu_read_unlock();
+	}
+
+	return 0;
 }
 
 static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
@@ -7014,6 +7108,13 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, sdp,
 			    "%s: %d device(s) found in host\n", __func__, k);
+
+	if (sdebug_fail_bus_reset(SCpnt)) {
+			scmd_printk(KERN_INFO, SCpnt, "fail bus reset 0x%x\n", SCpnt->cmnd[0]);
+			return FAILED;
+	}
+
+	sdebug_clear_tmout_abort_lunreset_on_channel(sdp);
 	return SUCCESS;
 }
 
@@ -7021,21 +7122,44 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 {
 	struct sdebug_host_info *sdbg_host;
 	struct sdebug_dev_info *devip;
+	struct sdebug_err_inject *err;
 	int k = 0;
 
 	++num_host_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, SCpnt->device, "%s\n", __func__);
 	mutex_lock(&sdebug_host_list_mutex);
+	// list_for_each_entry(sdbg_host, &sdebug_host_list, host_list) {
+	// 	list_for_each_entry(devip, &sdbg_host->dev_info_list,
+	// 			    dev_list) {
+	// 		set_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
+	// 		if (SCpnt->device->type == TYPE_TAPE)
+	// 			scsi_tape_reset_clear(devip);
+	// 		++k;
+	// 	}
+	// }
+
 	list_for_each_entry(sdbg_host, &sdebug_host_list, host_list) {
 		list_for_each_entry(devip, &sdbg_host->dev_info_list,
-				    dev_list) {
+							dev_list) {
 			set_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
 			if (SCpnt->device->type == TYPE_TAPE)
-				scsi_tape_reset_clear(devip);
+					scsi_tape_reset_clear(devip);
+
+			rcu_read_lock();
+			list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
+					if (err->type == ERR_TMOUT_CMD ||
+						err->type == ERR_ABORT_CMD_FAILED ||
+						err->type == ERR_LUN_RESET_FAILED ||
+						err->type == ERR_BUS_RESET_FAILED)
+							WRITE_ONCE(err->cnt, 0);
+			}
+			rcu_read_unlock();
+
 			++k;
 		}
 	}
+
 	mutex_unlock(&sdebug_host_list_mutex);
 	stop_all_queued();
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
