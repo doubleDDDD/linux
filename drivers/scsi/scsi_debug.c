@@ -7006,6 +7006,8 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	u8 opcode = cmd[0];
 	int k = 0;
 
+	pr_err("%s target reset start!\n", __func__);
+
 	++num_target_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, sdp, "%s\n", __func__);
@@ -7026,10 +7028,13 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	if (sdebug_fail_target_reset(SCpnt)) {
 		scmd_printk(KERN_INFO, SCpnt, "fail target reset 0x%x\n",
 			    opcode);
+		pr_err("%s end FAILED!\n", __func__);
 		return FAILED;
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_target(sdp);
+
+	pr_err("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
 }
@@ -7111,10 +7116,14 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 
 	if (sdebug_fail_bus_reset(SCpnt)) {
 			scmd_printk(KERN_INFO, SCpnt, "fail bus reset 0x%x\n", SCpnt->cmnd[0]);
+			pr_err("%s end FAILED!\n", __func__);
 			return FAILED;
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_channel(sdp);
+
+	pr_err("%s end SUCCESS!\n", __func__);
+
 	return SUCCESS;
 }
 
@@ -7165,6 +7174,9 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, SCpnt->device,
 			    "%s: %d device(s) found\n", __func__, k);
+
+	pr_err("%s end SUCCESS!\n", __func__);
+
 	return SUCCESS;
 }
 
