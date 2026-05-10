@@ -185,3 +185,4 @@ sphinx_*/
 /rust-project.json
 
 debug_kernel
+bc_eh_test
