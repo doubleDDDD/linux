@@ -120,7 +120,7 @@ static const char *sdebug_version_date = "20210520";
 #define DEF_NUM_HOST   1
 #define DEF_NUM_TGTS   1
 #define DEF_MAX_LUNS   1
-#define DEF_NUM_CHANNELS 2 /* 新增，为了模拟多 channel */
+#define DEF_NUM_CHANNELS 1 /* for multiple channel */
 /* With these defaults, this driver will make 1 host with 1 target
  * (id 0) containing 1 logical unit (lun 0). That is 1 device.
  */
