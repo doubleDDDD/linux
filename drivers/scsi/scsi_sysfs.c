@@ -369,6 +369,59 @@ store_shost_eh_deadline(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(eh_deadline, S_IRUGO | S_IWUSR, show_shost_eh_deadline, store_shost_eh_deadline);
 
+static ssize_t
+show_shost_eh_mode(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	switch (READ_ONCE(shost->eh_mode)) {
+	case SCSI_EH_MODE_SDEV:
+		return sysfs_emit(buf, "sdev\n");
+	case SCSI_EH_MODE_HOST:
+	default:
+		return sysfs_emit(buf, "host\n");
+	}
+}
+
+static ssize_t
+store_shost_eh_mode(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct Scsi_Host *shost = class_to_shost(dev);
+	enum scsi_eh_mode mode;
+	unsigned long flags;
+	int ret = -EINVAL;
+
+	if (sysfs_streq(buf, "host"))
+		mode = SCSI_EH_MODE_HOST;
+	else if (sysfs_streq(buf, "sdev"))
+		mode = SCSI_EH_MODE_SDEV;
+	else
+		return -EINVAL;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+
+	if (scsi_host_in_recovery(shost) || shost->host_failed) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	if (mode == SCSI_EH_MODE_SDEV && !shost->eh_checkpoint) {
+		ret = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+
+	WRITE_ONCE(shost->eh_mode, mode);
+	ret = count;
+
+out_unlock:
+	spin_unlock_irqrestore(shost->host_lock, flags);
+	return ret;
+}
+
+static DEVICE_ATTR(eh_mode, S_IRUGO | S_IWUSR, show_shost_eh_mode, store_shost_eh_mode);
+
 shost_rd_attr(unique_id, "%u\n");
 shost_rd_attr(cmd_per_lun, "%hd\n");
 shost_rd_attr(can_queue, "%d\n");
@@ -420,6 +473,7 @@ static struct attribute *scsi_sysfs_shost_attrs[] = {
 	&dev_attr_prot_guard_type.attr,
 	&dev_attr_host_reset.attr,
 	&dev_attr_eh_deadline.attr,
+	&dev_attr_eh_mode.attr,
 	&dev_attr_nr_hw_queues.attr,
 	NULL
 };

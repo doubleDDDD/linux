@@ -537,6 +537,11 @@ enum scsi_host_state {
 	SHOST_DEL_RECOVERY,
 };
 
+enum scsi_eh_mode {
+	SCSI_EH_MODE_HOST = 0,
+	SCSI_EH_MODE_SDEV = 1,
+};
+
 struct scsi_eh_work_sequence {
 	struct scsi_eh_work_sequence *prev_eh_work_seq;
 	struct scsi_eh_work_sequence *next_eh_work_seq;
@@ -572,6 +577,7 @@ struct Scsi_Host {
 	unsigned int schannel_failed;
 	unsigned int total_channels;
 	struct scsi_eh_work_sequence *eh_work_sequence;
+	enum scsi_eh_mode eh_mode; /* 方便测试用的 */
 	/****************************************************/
 
 	struct mutex		scan_mutex;/* serialize scanning activity */

@@ -6937,7 +6937,7 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 	u8 *cmd = SCpnt->cmnd;
 	u8 opcode = cmd[0];
 
-	pr_err("%s start!\n", __func__);
+	pr_err("%s START!\n", __func__);
 
 	++num_dev_resets;
 
@@ -7006,7 +7006,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	u8 opcode = cmd[0];
 	int k = 0;
 
-	pr_err("%s target reset start!\n", __func__);
+	pr_err("%s START!\n", __func__);
 
 	++num_target_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
@@ -7096,6 +7096,8 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 	struct sdebug_dev_info *devip;
 	int k = 0;
 
+	pr_err("%s START!\n", __func__);
+
 	++num_bus_resets;
 
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
@@ -7133,6 +7135,8 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	struct sdebug_dev_info *devip;
 	struct sdebug_err_inject *err;
 	int k = 0;
+
+	pr_err("%s START!\n", __func__);
 
 	++num_host_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
@@ -9436,7 +9440,8 @@ static int scsi_debug_queuecommand(struct Scsi_Host *shost,
 	}
 
 	if (sdebug_timeout_cmd(scp)) {
-		scmd_printk(KERN_INFO, scp, "timeout command 0x%x\n", opcode);
+		// scmd_printk(KERN_INFO, scp, "timeout command 0x%x\n", opcode); noise
+		pr_err("%s timeout command 0x%x\n", __func__, opcode);
 		return 0;
 	}
 
