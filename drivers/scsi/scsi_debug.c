@@ -1337,7 +1337,8 @@ static bool sdebug_consume_post_reset_validation(struct scsi_cmnd *scp,
 		return false;
 	if (scp->cmnd[0] != TEST_UNIT_READY)
 		return false;
-	if (scp->submitter != SUBMITTED_BY_SCSI_ERROR_HANDLER)
+	if (scp->submitter != SUBMITTED_BY_SCSI_ERROR_HANDLER &&
+		scp->submitter != SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER)
 		return false;
 
 	for (st = 0; st < SDEB_RST_MAX; st++) {
