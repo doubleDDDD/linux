@@ -351,7 +351,27 @@ enum sdebug_err_type {
 	ERR_LUN_RESET_FAILED	= 4,	/* control return FAILED from */
 					/* scsi_debug_device_reseLUN_RESET_FAILEDt() */
 	ERR_BUS_RESET_FAILED    = 5,    /* control return FAILED from */
-									/* scsi_debug_bus_reset() */
+					/* scsi_debug_bus_reset() */
+};
+
+enum sdebug_reset_stage {
+	SDEB_RST_DEV = 0,
+	SDEB_RST_TGT,
+	SDEB_RST_BUS,
+	SDEB_RST_HOST,
+	SDEB_RST_MAX,
+};
+
+enum sdebug_validate_action {
+	SDEB_VAL_NONE = 0,
+	SDEB_VAL_FAIL,
+	SDEB_VAL_TIMEOUT,
+};
+
+struct sdebug_validate_cfg {
+	u8 action;      /* SDEB_VAL_* */
+	int budget;     /* 0=disabled, >0 finite, <0 unlimited */
+	atomic_t armed; /* 已经被某级 reset arm，等待下次 EH TUR 消费 */
 };
 
 struct sdebug_err_inject {
@@ -423,6 +443,7 @@ struct sdebug_dev_info {
 	struct dentry *debugfs_entry;
 	struct spinlock list_lock;
 	struct list_head inject_err_list;
+	struct sdebug_validate_cfg val_after_reset[SDEB_RST_MAX];
 };
 
 struct sdebug_target_info {
@@ -432,6 +453,8 @@ struct sdebug_target_info {
 
 struct sdebug_host_info {
 	struct list_head host_list;
+	bool reset_fail;
+	struct dentry *debugfs_entry;
 	int si_idx;	/* sdeb_store_info (per host) xarray index */
 	struct Scsi_Host *shost;
 	struct device dev;
@@ -1226,6 +1249,193 @@ static const struct file_operations sdebug_error_fops = {
 	.release = single_release,
 };
 
+
+static const char *sdebug_reset_stage_name(enum sdebug_reset_stage st)
+{
+	switch (st) {
+	case SDEB_RST_DEV:  return "device";
+	case SDEB_RST_TGT:  return "target";
+	case SDEB_RST_BUS:  return "bus";
+	case SDEB_RST_HOST: return "host";
+	default:            return "unknown";
+}
+}
+
+static const char *sdebug_validate_action_name(int action)
+{
+	switch (action) {
+	case SDEB_VAL_FAIL:    return "fail";
+	case SDEB_VAL_TIMEOUT: return "timeout";
+	default:               return "none";
+	}
+}
+
+static int sdebug_parse_reset_stage(const char *s)
+{
+	if (!strcmp(s, "device")) return SDEB_RST_DEV;
+	if (!strcmp(s, "target")) return SDEB_RST_TGT;
+	if (!strcmp(s, "bus"))    return SDEB_RST_BUS;
+	if (!strcmp(s, "host"))   return SDEB_RST_HOST;
+	return -EINVAL;
+}
+
+static int sdebug_parse_validate_action(const char *s)
+{
+	if (!strcmp(s, "none"))    return SDEB_VAL_NONE;
+	if (!strcmp(s, "fail"))    return SDEB_VAL_FAIL;
+	if (!strcmp(s, "timeout")) return SDEB_VAL_TIMEOUT;
+	return -EINVAL;
+}
+
+static void sdebug_clear_reset_uas(struct sdebug_dev_info *devip)
+{
+	clear_bit(SDEBUG_UA_POR, devip->uas_bm);
+	clear_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
+}
+
+static void sdebug_arm_post_reset_validation(struct scsi_device *sdp,
+					enum sdebug_reset_stage stage)
+{
+	struct sdebug_dev_info *devip = sdp->hostdata;
+	struct sdebug_validate_cfg *cfg;
+
+	if (!devip)
+		return;
+
+	cfg = &devip->val_after_reset[stage];
+	if (cfg->action == SDEB_VAL_NONE || cfg->budget == 0)
+		return;
+
+	if (cfg->budget > 0)
+		cfg->budget--;
+
+	atomic_inc(&cfg->armed);
+}
+
+static bool sdebug_consume_one_armed(struct sdebug_validate_cfg *cfg)
+{
+	int old;
+
+	for (;;) {
+		old = atomic_read(&cfg->armed);
+		if (old <= 0)
+			return false;
+		if (atomic_cmpxchg(&cfg->armed, old, old - 1) == old)
+			return true;
+	}
+}
+
+static bool sdebug_consume_post_reset_validation(struct scsi_cmnd *scp,
+						enum sdebug_reset_stage *stage,
+						enum sdebug_validate_action *action)
+{
+	struct scsi_device *sdp = scp->device;
+	struct sdebug_dev_info *devip = sdp->hostdata;
+	int st;
+
+	if (!devip)
+		return false;
+	if (scp->cmnd[0] != TEST_UNIT_READY)
+		return false;
+	if (scp->submitter != SUBMITTED_BY_SCSI_ERROR_HANDLER)
+		return false;
+
+	for (st = 0; st < SDEB_RST_MAX; st++) {
+		struct sdebug_validate_cfg *cfg = &devip->val_after_reset[st];
+
+		if (!sdebug_consume_one_armed(cfg))
+			continue;
+
+		sdp->expecting_cc_ua = 0;
+		sdebug_clear_reset_uas(devip);
+
+		*stage = st;
+		*action = cfg->action;
+		return true;
+	}
+	return false;
+}
+
+static int sdebug_validate_after_reset_show(struct seq_file *m, void *p)
+{
+	struct scsi_device *sdev = m->private;
+	struct sdebug_dev_info *devip = sdev->hostdata;
+	int st;
+
+	seq_puts(m, "stage\taction\tbudget\tarmed\n");
+	for (st = 0; st < SDEB_RST_MAX; st++) {
+		struct sdebug_validate_cfg *cfg = &devip->val_after_reset[st];
+
+		seq_printf(m, "%s\t%s\t%d\t%d\n",
+				sdebug_reset_stage_name(st),
+				sdebug_validate_action_name(cfg->action),
+				cfg->budget,
+				atomic_read(&cfg->armed));
+	}
+	return 0;
+}
+
+static int sdebug_validate_after_reset_open(struct inode *inode,
+					struct file *file)
+{
+	return single_open(file, sdebug_validate_after_reset_show,
+				inode->i_private);
+}
+
+static ssize_t sdebug_validate_after_reset_write(struct file *file,
+	const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	char *buf;
+	char stage_s[16], action_s[16];
+	int stage, action, budget;
+	struct scsi_device *sdev = file->f_inode->i_private;
+	struct sdebug_dev_info *devip = sdev->hostdata;
+	struct sdebug_validate_cfg *cfg;
+	int st;
+
+	buf = memdup_user_nul(ubuf, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+
+	if (!strncmp(buf, "clear", 5)) {
+		for (st = 0; st < SDEB_RST_MAX; st++) {
+			devip->val_after_reset[st].action = SDEB_VAL_NONE;
+			devip->val_after_reset[st].budget = 0;
+			atomic_set(&devip->val_after_reset[st].armed, 0);
+		}
+		kfree(buf);
+		return count;
+	}
+
+	if (sscanf(buf, "%15s %15s %d", stage_s, action_s, &budget) != 3) {
+		kfree(buf);
+		return -EINVAL;
+	}
+
+	stage = sdebug_parse_reset_stage(stage_s);
+	action = sdebug_parse_validate_action(action_s);
+	if (stage < 0 || action < 0) {
+		kfree(buf);
+		return -EINVAL;
+	}
+
+	cfg = &devip->val_after_reset[stage];
+	cfg->action = action;
+	cfg->budget = budget;
+	atomic_set(&cfg->armed, 0);
+
+	kfree(buf);
+	return count;
+}
+
+static const struct file_operations sdebug_validate_after_reset_fops = {
+	.open    = sdebug_validate_after_reset_open,
+	.read    = seq_read,
+	.write   = sdebug_validate_after_reset_write,
+	.release = single_release,
+};
+
+
 static int sdebug_target_reset_fail_show(struct seq_file *m, void *p)
 {
 	struct scsi_target *starget = (struct scsi_target *)m->private;
@@ -1263,6 +1473,37 @@ static const struct file_operations sdebug_target_reset_fail_fops = {
 	.open	= sdebug_target_reset_fail_open,
 	.read	= seq_read,
 	.write	= sdebug_target_reset_fail_write,
+	.release = single_release,
+};
+
+static int sdebug_host_reset_fail_show(struct seq_file *m, void *p)
+{
+	struct sdebug_host_info *sdbg_host = m->private;
+
+	seq_printf(m, "%d\n", sdbg_host->reset_fail);
+	return 0;
+}
+
+static int sdebug_host_reset_fail_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, sdebug_host_reset_fail_show,
+				inode->i_private);
+}
+
+static ssize_t sdebug_host_reset_fail_write(struct file *file,
+	const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	int ret;
+	struct sdebug_host_info *sdbg_host = file->f_inode->i_private;
+
+	ret = kstrtobool_from_user(ubuf, count, &sdbg_host->reset_fail);
+	return ret < 0 ? ret : count;
+}
+
+static const struct file_operations sdebug_host_reset_fail_fops = {
+	.open    = sdebug_host_reset_fail_open,
+	.read    = seq_read,
+	.write   = sdebug_host_reset_fail_write,
 	.release = single_release,
 };
 
@@ -6557,6 +6798,7 @@ static struct sdebug_dev_info *sdebug_device_create(
 			struct sdebug_host_info *sdbg_host, gfp_t flags)
 {
 	struct sdebug_dev_info *devip;
+	int k;
 
 	devip = kzalloc(sizeof(*devip), flags);
 	if (devip) {
@@ -6589,6 +6831,11 @@ static struct sdebug_dev_info *sdebug_device_create(
 		atomic_set(&devip->stopped, (sdeb_tur_ms_to_ready > 0 ? 2 : 0));
 		spin_lock_init(&devip->list_lock);
 		INIT_LIST_HEAD(&devip->inject_err_list);
+		for (k = 0; k < SDEB_RST_MAX; k++) {
+			devip->val_after_reset[k].action = SDEB_VAL_NONE;
+			devip->val_after_reset[k].budget = 0;
+			atomic_set(&devip->val_after_reset[k].armed, 0);
+		}
 		list_add_tail(&devip->dev_list, &sdbg_host->dev_info_list);
 	}
 	return devip;
@@ -6688,6 +6935,13 @@ static int scsi_debug_sdev_configure(struct scsi_device *sdp,
 				&sdebug_error_fops);
 	if (IS_ERR_OR_NULL(dentry))
 		pr_info("%s: failed to create error file for device %s\n",
+			__func__, dev_name(&sdp->sdev_gendev));
+
+	dentry = debugfs_create_file("validate_after_reset", 0600,
+				devip->debugfs_entry, sdp,
+				&sdebug_validate_after_reset_fops);
+	if (IS_ERR_OR_NULL(dentry))
+		pr_info("%s: failed to create validate_after_reset for %s\n",
 			__func__, dev_name(&sdp->sdev_gendev));
 
 	return 0;
@@ -6958,6 +7212,7 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_injects(sdp);
+	sdebug_arm_post_reset_validation(sdp, SDEB_RST_DEV);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -7033,6 +7288,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_target(sdp);
+	sdebug_arm_post_reset_validation(sdp, SDEB_RST_TGT);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -7123,6 +7379,7 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_channel(sdp);
+	sdebug_arm_post_reset_validation(sdp, SDEB_RST_BUS);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -7178,6 +7435,8 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, SCpnt->device,
 			    "%s: %d device(s) found\n", __func__, k);
+
+	sdebug_arm_post_reset_validation(SCpnt->device, SDEB_RST_HOST);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -9438,6 +9697,31 @@ static int scsi_debug_queuecommand(struct Scsi_Host *shost,
 		if (NULL == devip)
 			goto err_out;
 	}
+	{
+		enum sdebug_reset_stage vst;
+		enum sdebug_validate_action vact;
+
+		if (sdebug_consume_post_reset_validation(scp, &vst, &vact)) {
+			if (vact == SDEB_VAL_TIMEOUT) {
+				scmd_printk(KERN_INFO, scp,
+						"post-%s TUR timeout\n",
+						sdebug_reset_stage_name(vst));
+				return 0; /* 不完成，等 EH TUR 自己超时 */
+			}
+
+			if (vact == SDEB_VAL_FAIL) {
+				int vret;
+
+				scmd_printk(KERN_INFO, scp,
+						"post-%s TUR fail\n",
+						sdebug_reset_stage_name(vst));
+
+				vret = schedule_resp(scp, devip, DID_ERROR << 16,
+							NULL, 0, 0);
+				return vret;
+			}
+		}
+	}
 
 	if (sdebug_timeout_cmd(scp)) {
 		// scmd_printk(KERN_INFO, scp, "timeout command 0x%x\n", opcode); noise
@@ -9676,6 +9960,18 @@ static int sdebug_driver_probe(struct device *dev)
 		hpnt->nr_maps = 3;
 
 	sdbg_host->shost = hpnt;
+	sdbg_host->reset_fail = false;
+	sdbg_host->debugfs_entry =
+		debugfs_create_dir(dev_name(&hpnt->shost_dev),
+					sdebug_debugfs_root);
+
+	if (IS_ERR_OR_NULL(sdbg_host->debugfs_entry))
+		pr_info("%s: failed to create host debugfs dir for %s\n",
+			__func__, dev_name(&hpnt->shost_dev));
+	else
+		debugfs_create_file("fail_reset", 0600,
+					sdbg_host->debugfs_entry, sdbg_host,
+					&sdebug_host_reset_fail_fops);
 	if ((hpnt->this_id >= 0) && (sdebug_num_tgts > hpnt->this_id))
 		hpnt->max_id = sdebug_num_tgts + 1;
 	else
@@ -9753,6 +10049,7 @@ static void sdebug_driver_remove(struct device *dev)
 	sdbg_host = dev_to_sdebug_host(dev);
 
 	scsi_remove_host(sdbg_host->shost);
+	debugfs_remove(sdbg_host->debugfs_entry);
 
 	list_for_each_entry_safe(sdbg_devinfo, tmp, &sdbg_host->dev_info_list,
 				 dev_list) {
