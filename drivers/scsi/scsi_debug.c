@@ -1293,10 +1293,10 @@ static void sdebug_clear_reset_uas(struct sdebug_dev_info *devip)
 	clear_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
 }
 
-static void sdebug_arm_post_reset_validation(struct scsi_device *sdp,
+static void sdebug_arm_post_reset_validation(struct sdebug_dev_info *devip,
 					enum sdebug_reset_stage stage)
 {
-	struct sdebug_dev_info *devip = sdp->hostdata;
+	// struct sdebug_dev_info *devip = sdp->hostdata;
 	struct sdebug_validate_cfg *cfg;
 
 	if (!devip)
@@ -7212,7 +7212,7 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_injects(sdp);
-	sdebug_arm_post_reset_validation(sdp, SDEB_RST_DEV);
+	sdebug_arm_post_reset_validation(devip, SDEB_RST_DEV);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -7288,7 +7288,10 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_target(sdp);
-	sdebug_arm_post_reset_validation(sdp, SDEB_RST_TGT);
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		if (devip->channel == sdp->channel && devip->target == sdp->id)
+			sdebug_arm_post_reset_validation(devip, SDEB_RST_TGT);
+	}
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -7379,8 +7382,10 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	sdebug_clear_tmout_abort_lunreset_on_channel(sdp);
-	sdebug_arm_post_reset_validation(sdp, SDEB_RST_BUS);
-
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		if (devip->channel == sdp->channel)
+			sdebug_arm_post_reset_validation(devip, SDEB_RST_BUS);
+	}
 	pr_err("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
@@ -7388,10 +7393,12 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 
 static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 {
-	struct sdebug_host_info *sdbg_host;
-	struct sdebug_dev_info *devip;
-	struct sdebug_err_inject *err;
-	int k = 0;
+        struct scsi_device *sdp = SCpnt->device;
+        struct sdebug_host_info *sdbg_host = shost_to_sdebug_host(sdp->host);
+        struct sdebug_dev_info *devip;
+        struct sdebug_err_inject *err;
+        bool host_fail;
+        int k = 0;
 
 	pr_err("%s START!\n", __func__);
 
@@ -7408,35 +7415,41 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	// 		++k;
 	// 	}
 	// }
+	list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
+		set_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
+		if (SCpnt->device->type == TYPE_TAPE)
+			scsi_tape_reset_clear(devip);
+		++k;
+	}
 
-	list_for_each_entry(sdbg_host, &sdebug_host_list, host_list) {
-		list_for_each_entry(devip, &sdbg_host->dev_info_list,
-							dev_list) {
-			set_bit(SDEBUG_UA_BUS_RESET, devip->uas_bm);
-			if (SCpnt->device->type == TYPE_TAPE)
-					scsi_tape_reset_clear(devip);
-
+	host_fail = sdbg_host->reset_fail;
+	if (!host_fail) {
+		list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list) {
 			rcu_read_lock();
 			list_for_each_entry_rcu(err, &devip->inject_err_list, list) {
-					if (err->type == ERR_TMOUT_CMD ||
-						err->type == ERR_ABORT_CMD_FAILED ||
-						err->type == ERR_LUN_RESET_FAILED ||
-						err->type == ERR_BUS_RESET_FAILED)
-							WRITE_ONCE(err->cnt, 0);
+				if (err->type == ERR_TMOUT_CMD ||
+				err->type == ERR_ABORT_CMD_FAILED ||
+				err->type == ERR_LUN_RESET_FAILED ||
+				err->type == ERR_BUS_RESET_FAILED)
+					WRITE_ONCE(err->cnt, 0);
 			}
 			rcu_read_unlock();
-
-			++k;
 		}
+
+		list_for_each_entry(devip, &sdbg_host->dev_info_list, dev_list)
+			sdebug_arm_post_reset_validation(devip, SDEB_RST_HOST);
 	}
 
 	mutex_unlock(&sdebug_host_list_mutex);
 	stop_all_queued();
+	if (host_fail) {
+		scmd_printk(KERN_INFO, SCpnt, "fail host reset 0x%x\n", SCpnt->cmnd[0]);
+		pr_err("%s end FAILED!\n", __func__);
+		return FAILED;
+	}
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, SCpnt->device,
 			    "%s: %d device(s) found\n", __func__, k);
-
-	sdebug_arm_post_reset_validation(SCpnt->device, SDEB_RST_HOST);
 
 	pr_err("%s end SUCCESS!\n", __func__);
 
@@ -9960,18 +9973,6 @@ static int sdebug_driver_probe(struct device *dev)
 		hpnt->nr_maps = 3;
 
 	sdbg_host->shost = hpnt;
-	sdbg_host->reset_fail = false;
-	sdbg_host->debugfs_entry =
-		debugfs_create_dir(dev_name(&hpnt->shost_dev),
-					sdebug_debugfs_root);
-
-	if (IS_ERR_OR_NULL(sdbg_host->debugfs_entry))
-		pr_info("%s: failed to create host debugfs dir for %s\n",
-			__func__, dev_name(&hpnt->shost_dev));
-	else
-		debugfs_create_file("fail_reset", 0600,
-					sdbg_host->debugfs_entry, sdbg_host,
-					&sdebug_host_reset_fail_fops);
 	if ((hpnt->this_id >= 0) && (sdebug_num_tgts > hpnt->this_id))
 		hpnt->max_id = sdebug_num_tgts + 1;
 	else
@@ -10035,6 +10036,18 @@ static int sdebug_driver_probe(struct device *dev)
 		error = -ENODEV;
 		scsi_host_put(hpnt);
 	} else {
+		sdbg_host->reset_fail = false;
+		sdbg_host->debugfs_entry =
+			debugfs_create_dir(dev_name(&hpnt->shost_dev),
+						sdebug_debugfs_root);
+
+		if (IS_ERR_OR_NULL(sdbg_host->debugfs_entry))
+			pr_info("%s: failed to create host debugfs dir for %s\n",
+				__func__, dev_name(&hpnt->shost_dev));
+		else
+			debugfs_create_file("fail_reset", 0600,
+						sdbg_host->debugfs_entry, sdbg_host,
+						&sdebug_host_reset_fail_fops);
 		scsi_scan_host(hpnt);
 	}
 
