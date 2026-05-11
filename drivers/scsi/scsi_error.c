@@ -157,12 +157,15 @@ scmd_eh_abort_handler(struct work_struct *work)
 		SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_INFO, scmd,
 				    "eh timeout, not aborting\n"));
+		scmd_printk(KERN_INFO, scmd,
+				"eh timeout, not aborting\n");
 		goto out;
 	}
 
 	SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_INFO, scmd,
 				    "aborting command\n"));
+	scmd_printk(KERN_INFO, scmd, "aborting command\n");
 	rtn = scsi_try_to_abort_cmd(shost->hostt, scmd);
 	if (rtn != SUCCESS) {
 		SCSI_LOG_ERROR_RECOVERY(3,
@@ -170,6 +173,10 @@ scmd_eh_abort_handler(struct work_struct *work)
 				    "cmd abort %s\n",
 				    (rtn == FAST_IO_FAIL) ?
 				    "not send" : "failed"));
+		scmd_printk(KERN_INFO, scmd,
+				"cmd abort %s\n",
+				(rtn == FAST_IO_FAIL) ?
+				"not send" : "failed");
 		goto out;
 	}
 	set_host_byte(scmd, DID_TIME_OUT);
@@ -178,6 +185,9 @@ scmd_eh_abort_handler(struct work_struct *work)
 			scmd_printk(KERN_INFO, scmd,
 				    "eh timeout, not retrying "
 				    "aborted command\n"));
+		scmd_printk(KERN_INFO, scmd,
+				"eh timeout, not retrying "
+				"aborted command\n");
 		goto out;
 	}
 
@@ -201,11 +211,15 @@ scmd_eh_abort_handler(struct work_struct *work)
 		SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_WARNING, scmd,
 				    "retry aborted command\n"));
+		scmd_printk(KERN_WARNING, scmd,
+				"retry aborted command\n");
 		scsi_queue_insert(scmd, SCSI_MLQUEUE_EH_RETRY);
 	} else {
 		SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_WARNING, scmd,
 				    "finish aborted command\n"));
+		scmd_printk(KERN_WARNING, scmd,
+				"finish aborted command\n");
 		scsi_finish_command(scmd);
 	}
 	return;
@@ -3418,6 +3432,7 @@ retry_tur:
 
 	SCSI_LOG_ERROR_RECOVERY(3, scmd_printk(KERN_INFO, scmd,
 		"%s return: %x\n", __func__, rtn));
+	scmd_printk(KERN_INFO, scmd, "%s return: %x\n", __func__, rtn);
 
 	switch (rtn) {
 	case NEEDS_RETRY:
@@ -3464,6 +3479,9 @@ static int scsi_eh_test_devices(struct list_head *cmd_list,
 					sdev_printk(KERN_INFO, sdev,
 						    "%s: skip test device, past eh deadline",
 						    current->comm));
+				sdev_printk(KERN_INFO, sdev,
+						"%s: skip test device, past eh deadline",
+						current->comm);
 				break;
 			}
 		}
@@ -3602,6 +3620,9 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 				sdev_printk(KERN_INFO, sdev,
 					    "%s: skip BDR, past eh deadline\n",
 					     current->comm));
+			sdev_printk(KERN_INFO, sdev,
+					"%s: skip BDR, past eh deadline\n",
+					current->comm);
 			scsi_device_put(sdev);
 			break;
 		}
@@ -3618,8 +3639,11 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 		SCSI_LOG_ERROR_RECOVERY(3,
 			sdev_printk(KERN_INFO, sdev,
 				     "%s: Sending BDR\n", current->comm));
+		sdev_printk(KERN_INFO, sdev,
+				"%s: Sending BDR\n", current->comm);
 		rtn = scsi_try_bus_device_reset(bdr_scmd);
 		pr_err("%s after scsi_try_bus_device_reset rtn=0x%x\n", __func__, rtn);
+		sdev_printk(KERN_INFO, sdev, "%s: BDR SUCCESS\n", current->comm);
 		if (rtn == SUCCESS || rtn == FAST_IO_FAIL) {
 			if (!scsi_device_online(sdev) ||
 			    rtn == FAST_IO_FAIL ||
@@ -3636,6 +3660,8 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 			SCSI_LOG_ERROR_RECOVERY(3,
 				sdev_printk(KERN_INFO, sdev,
 					    "%s: BDR failed\n", current->comm));
+			sdev_printk(KERN_INFO, sdev,
+					"%s: BDR failed\n", current->comm);
 		}
 	}
 
@@ -3673,6 +3699,9 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					    "%s: Skip target reset, past eh deadline\n",
 					     current->comm));
+			shost_printk(KERN_INFO, shost,
+					"%s: Skip target reset, past eh deadline\n",
+					current->comm);
 			return list_empty(work_q);
 		}
 
@@ -3683,6 +3712,9 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending target reset to target %d\n",
 				     current->comm, id));
+		shost_printk(KERN_INFO, shost,
+				"%s: Sending target reset to target %d\n",
+				current->comm, id);
 		rtn = scsi_try_target_reset(scmd);
 		if (rtn != SUCCESS && rtn != FAST_IO_FAIL)
 			SCSI_LOG_ERROR_RECOVERY(3,
@@ -3690,6 +3722,10 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 					     "%s: Target reset failed"
 					     " target: %d\n",
 					     current->comm, id));
+			shost_printk(KERN_INFO, shost,
+					"%s: Target reset failed"
+					" target: %d\n",
+					current->comm, id);
 		list_for_each_entry_safe(scmd, next, &tmp_list, eh_entry) {
 			if (scmd_id(scmd) != id)
 				continue;
@@ -3736,6 +3772,9 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					    "%s: skip BRST, past eh deadline\n",
 					     current->comm));
+			shost_printk(KERN_INFO, shost,
+					"%s: skip BRST, past eh deadline\n",
+					current->comm);
 			return list_empty(work_q);
 		}
 
@@ -3757,6 +3796,9 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending BRST chan: %d\n",
 				     current->comm, channel));
+		shost_printk(KERN_INFO, shost,
+				"%s: Sending BRST chan: %d\n",
+				current->comm, channel);
 		rtn = scsi_try_bus_reset(chan_scmd);
 		if (rtn == SUCCESS || rtn == FAST_IO_FAIL) {
 			list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
@@ -3774,6 +3816,9 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					     "%s: BRST failed chan: %d\n",
 					     current->comm, channel));
+			shost_printk(KERN_INFO, shost,
+					"%s: BRST failed chan: %d\n",
+					current->comm, channel);
 		}
 	}
 	return scsi_eh_test_devices(&check_list, work_q, done_q, 0);
@@ -3801,6 +3846,9 @@ static int scsi_eh_host_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending HRST\n",
 				     current->comm));
+		shost_printk(KERN_INFO, shost,
+				"%s: Sending HRST\n",
+				current->comm);
 
 		rtn = scsi_try_host_reset(scmd);
 		if (rtn == SUCCESS) {
@@ -3814,6 +3862,9 @@ static int scsi_eh_host_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					     "%s: HRST failed\n",
 					     current->comm));
+			shost_printk(KERN_INFO, shost,
+					"%s: HRST failed\n",
+					current->comm);
 		}
 	}
 	return scsi_eh_test_devices(&check_list, work_q, done_q, 1);
@@ -4288,6 +4339,8 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 	list_splice_init(&shost->eh_cmd_q, &eh_work_q);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
+	pr_err("%s START!\n", __func__);
+
 	SCSI_LOG_ERROR_RECOVERY(1, scsi_eh_prt_fail_stats(shost, &eh_work_q));
 
 	if (!scsi_eh_get_sense(&eh_work_q, &eh_done_q))
@@ -4298,6 +4351,7 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 		shost->last_reset = 0;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 	scsi_eh_flush_done_q(&eh_done_q);
+	pr_err("%s END!\n", __func__);
 }
 
 /**

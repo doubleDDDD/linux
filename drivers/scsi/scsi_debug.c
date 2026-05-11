@@ -6830,8 +6830,8 @@ static int sdebug_fail_abort(struct scsi_cmnd *cmnd)
 static int scsi_debug_abort(struct scsi_cmnd *SCpnt)
 {
 	bool aborted = scsi_debug_abort_cmnd(SCpnt);
-	u8 *cmd = SCpnt->cmnd;
-	u8 opcode = cmd[0];
+	// u8 *cmd = SCpnt->cmnd;
+	// u8 opcode = cmd[0];
 
 	++num_aborts;
 
@@ -6842,8 +6842,8 @@ static int scsi_debug_abort(struct scsi_cmnd *SCpnt)
 
 
 	if (sdebug_fail_abort(SCpnt)) {
-		scmd_printk(KERN_INFO, SCpnt, "fail abort command 0x%x\n",
-			    opcode);
+		// scmd_printk(KERN_INFO, SCpnt, "fail abort command 0x%x\n",
+		// 	    opcode);
 		return FAILED;
 	}
 
@@ -9441,7 +9441,6 @@ static int scsi_debug_queuecommand(struct Scsi_Host *shost,
 
 	if (sdebug_timeout_cmd(scp)) {
 		// scmd_printk(KERN_INFO, scp, "timeout command 0x%x\n", opcode); noise
-		pr_err("%s timeout command 0x%x\n", __func__, opcode);
 		return 0;
 	}
 
