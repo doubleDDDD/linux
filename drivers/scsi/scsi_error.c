@@ -434,11 +434,11 @@ static char* scsi_eh_locate_sdev(struct scsi_device *sdev)
 {
     memset(sdev_locate, 0, sizeof(sdev_locate));
 
-    snprintf(sdev_locate, sizeof(sdev_locate), "sdev(%d:%d:%d:%d)",
-             sdev->host->unique_id,
+    snprintf(sdev_locate, sizeof(sdev_locate), "sdev(%d:%d:%d:%lld)",
+             sdev->host->host_no,
              sdev->channel,
              sdev->sdev_target->id,
-             sdev->id);
+             sdev->lun);
 
     return sdev_locate;
 }
@@ -448,7 +448,7 @@ static char* scsi_eh_locate_starget(struct scsi_target *starget)
     memset(starget_locate, 0, sizeof(starget_locate));
 
     snprintf(starget_locate, sizeof(starget_locate), "starget(%d:%d:%d)",
-             starget->host->unique_id,
+             starget->host->host_no,
              starget->channel,
              starget->id);
 
@@ -460,7 +460,7 @@ static char* scsi_eh_locate_schannel(struct scsi_channel *schannel)
     memset(schannel_locate, 0, sizeof(schannel_locate));
 
     snprintf(schannel_locate, sizeof(schannel_locate), "schannel(%d:%d)",
-             schannel->host->unique_id,
+             schannel->host->host_no,
              schannel->channel);
 
     return schannel_locate;
@@ -471,7 +471,7 @@ static char* scsi_eh_locate_shost(struct Scsi_Host *shost)
     memset(shost_locate, 0, sizeof(shost_locate));
 
     snprintf(shost_locate, sizeof(shost_locate), "shost(%d)",
-             shost->unique_id);
+             shost->host_no);
 
     return shost_locate;
 }
@@ -1005,6 +1005,7 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 
 static void scsi_eh_recover_scmd(struct scsi_device *sdev, struct scsi_cmnd *scmd)
 {
+	// TODO 判空
 	scsi_eh_restore_cmnd(scmd, sdev->ses); /* 恢复 scmd */
 	kfree(sdev->ses);
 	sdev->ses = NULL;
@@ -1022,6 +1023,7 @@ static void scsi_eh_recover_sdev(struct scsi_device *sdev)
 	sdev->is_worker_waiting = false;
 	sdev->pfaction = OFFLINE_POST_FAULT;
 	sdev->eh_reset_level = EH_SDEV;
+	sdev->scmd_failed = 0;
 	if (sdev->eh_queued) {
 		sdev->eh_queued = false;
 		list_del(&sdev->sdev_eh_siblings);
@@ -1033,6 +1035,7 @@ static void scsi_eh_recover_starget(struct scsi_target *starget)
 {
 	atomic_set(&starget->eh_starget_state, EH_NORMAL);
 	starget->pfaction = OFFLINE_POST_FAULT;
+	starget->sdev_failed = 0;
 	if (starget->eh_queued) {
 		starget->eh_queued = false;
 		list_del(&starget->starget_eh_siblings);
@@ -1044,6 +1047,7 @@ static void scsi_eh_recover_schannel(struct scsi_channel *schannel)
 {
 	atomic_set(&schannel->eh_schannel_state, EH_NORMAL);
 	schannel->pfaction = OFFLINE_POST_FAULT;
+	schannel->starget_failed = 0;
 	if (schannel->eh_queued) {
 		schannel->eh_queued = false;
 		list_del(&schannel->schannel_eh_siblings);
@@ -1055,6 +1059,7 @@ static void scsi_eh_recover_shost(struct Scsi_Host *shost)
 {
 	atomic_set(&shost->eh_shost_state, EH_NORMAL);
 	shost->pfaction = OFFLINE_POST_FAULT;
+	shost->schannel_failed = 0;
 	// pr_err("%s: %s recover eh state!\n", __func__, scsi_eh_locate_shost(shost));
 }
 
