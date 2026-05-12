@@ -1007,6 +1007,7 @@ static void scsi_eh_recover_scmd(struct scsi_device *sdev, struct scsi_cmnd *scm
 	scsi_eh_restore_cmnd(scmd, sdev->ses); /* 恢复 scmd */
 	kfree(sdev->ses);
 	sdev->ses = NULL;
+	sdev->reset_tur_retry_count = 0;
 	scmd->submitter = SUBMITTED_BY_BLOCK_LAYER;
 	// pr_err("%s: %s recover tur scmd!\n", __func__, scsi_eh_locate_sdev(sdev));
 }
@@ -1093,6 +1094,11 @@ static void scsi_eh_make_sdev_running(struct scsi_device *sdev)
 	scsi_rescan_device(sdev);
 }
 
+static enum scsi_disposition scsi_eh_completed_normally(struct scsi_cmnd *scmd);
+
+#define SCSI_EH_RESET_TUR_TIMEOUT     (10 * HZ)
+#define SCSI_EH_RESET_TUR_MAX_RETRIES 1
+
 static void scsi_eh_send_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
 {
 	static unsigned char tur_command[6] = {TEST_UNIT_READY, 0, 0, 0, 0, 0};
@@ -1100,36 +1106,72 @@ static void scsi_eh_send_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd 
 	mutex_lock(&sdev->state_mutex);
 	scsi_device_set_state(sdev, SDEV_RUNNING);
 	mutex_unlock(&sdev->state_mutex);
+
 	if(!sdev->ses)
 		sdev->ses = kzalloc(sizeof(struct scsi_eh_save), GFP_KERNEL);
+
 	scsi_eh_prep_cmnd(scmd, sdev->ses, tur_command, 6, 0);
 	scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
 	init_completion(&sdev->eh_wait_tur_done);
 	pr_err("%s: SEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
 }
 
+static void scsi_eh_resend_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
+{
+	mutex_lock(&sdev->state_mutex);
+	scsi_device_set_state(sdev, SDEV_RUNNING);
+	mutex_unlock(&sdev->state_mutex);
+
+	scmd->result = 0;
+	scmd->resid_len = 0;
+	scmd->underflow = 0;
+	memset(scmd->sense_buffer, 0, SCSI_SENSE_BUFFERSIZE);
+	scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
+	init_completion(&sdev->eh_wait_tur_done);
+	pr_err("%s: RESEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
+}
+
 enum scsi_eh_tur_state {
 	SCSI_EH_TUR_PENDING = 0,
 	SCSI_EH_TUR_SUCCESS,
+	SCSI_EH_TUR_RETRY,
 	SCSI_EH_TUR_FAILED,
 };
 
-static bool scsi_eh_tur_succeeded(struct scsi_cmnd *scmd)
+// static bool scsi_eh_tur_succeeded(struct scsi_cmnd *scmd)
+// {
+// 	return get_host_byte(scmd) == DID_OK &&
+// 		scsi_status_is_good(scmd->result);
+// }
+
+static enum scsi_disposition scsi_eh_eval_tur_result(struct scsi_cmnd *scmd)
 {
-	return get_host_byte(scmd) == DID_OK &&
-		scsi_status_is_good(scmd->result);
+	enum scsi_cmnd_submitter saved_submitter = scmd->submitter;
+	enum scsi_disposition rtn;
+
+	scmd->submitter = SUBMITTED_BY_SCSI_ERROR_HANDLER;
+	rtn = scsi_eh_completed_normally(scmd);
+	scmd->submitter = saved_submitter;
+	return rtn;
 }
 
 static enum scsi_eh_tur_state
 scsi_eh_get_tur_state(struct scsi_device *sdev, struct scsi_cmnd *scmd)
 {
+	enum scsi_disposition rtn;
+
 	if (!completion_done(&sdev->eh_wait_tur_done))
 		return SCSI_EH_TUR_PENDING;
 
-	if (scsi_eh_tur_succeeded(scmd))
+	rtn = scsi_eh_eval_tur_result(scmd);
+	switch (rtn) {
+	case SUCCESS:
 		return SCSI_EH_TUR_SUCCESS;
-
-	return SCSI_EH_TUR_FAILED;
+	case NEEDS_RETRY:
+		return SCSI_EH_TUR_RETRY;
+	default:
+		return SCSI_EH_TUR_FAILED;
+	}
 }
 
 static void scsi_eh_log_tur_failed(const char *from,
@@ -1139,6 +1181,104 @@ static void scsi_eh_log_tur_failed(const char *from,
 	pr_err("%s: %s TUR failed, result=0x%x host=0x%x status=0x%x\n",
 		from, scsi_eh_locate_sdev(sdev), scmd->result,
 		get_host_byte(scmd), get_status_byte(scmd));
+}
+
+
+static bool scsi_eh_retry_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
+{
+	struct Scsi_Host *shost = sdev->host;
+	int rtn;
+
+	if (sdev->reset_tur_retry_count >= SCSI_EH_RESET_TUR_MAX_RETRIES)
+		return false;
+
+	sdev->reset_tur_retry_count++;
+	scsi_eh_resend_tur_to_sdev(sdev, scmd);
+
+	rtn = shost->hostt->queuecommand(shost, scmd);
+	return rtn == 0;
+}
+
+static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
+				struct scsi_cmnd *scmd,
+				const char *from)
+{
+	enum scsi_eh_tur_state tur_state;
+	unsigned long time_ret;
+
+	for (;;) {
+		time_ret = wait_for_completion_timeout(&sdev->eh_wait_tur_done,
+							SCSI_EH_RESET_TUR_TIMEOUT);
+		if (!time_ret) {
+			pr_err("%s: %s TUR timeout!\n", from, scsi_eh_locate_sdev(sdev));
+			return false;
+		}
+
+		tur_state = scsi_eh_get_tur_state(sdev, scmd);
+		switch (tur_state) {
+		case SCSI_EH_TUR_SUCCESS:
+			return true;
+		case SCSI_EH_TUR_RETRY:
+			if (!scsi_eh_retry_tur_to_sdev(sdev, scmd)) {
+				pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+					from, scsi_eh_locate_sdev(sdev),
+					sdev->reset_tur_retry_count);
+				return false;
+			}
+			continue;
+		case SCSI_EH_TUR_FAILED:
+		default:
+			scsi_eh_log_tur_failed(from, sdev, scmd);
+			return false;
+		}
+	}
+}
+
+static void scsi_eh_report_sdev_reset(struct scsi_device *sdev)
+{
+	unsigned long flags;
+	struct Scsi_Host *shost = sdev->host;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	scsi_report_device_reset(shost, sdev->channel, sdev->id);
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
+static void scsi_eh_report_starget_reset(struct scsi_target *starget)
+{
+	unsigned long flags;
+	struct Scsi_Host *shost = starget->host;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	scsi_report_device_reset(shost, starget->channel, starget->id);
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
+static void scsi_eh_report_schannel_reset(struct scsi_channel *schannel)
+{
+	unsigned long flags;
+	struct Scsi_Host *shost = schannel->host;
+
+	if (!shost->hostt->skip_settle_delay)
+		ssleep(BUS_RESET_SETTLE_TIME);
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	scsi_report_bus_reset(shost, schannel->channel);
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
+static void scsi_eh_report_shost_reset(struct Scsi_Host *shost)
+{
+	unsigned long flags;
+	struct scsi_channel *schannel;
+
+	if (!shost->hostt->skip_settle_delay)
+		ssleep(HOST_RESET_SETTLE_TIME);
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	list_for_each_entry(schannel, &shost->schannels, same_host_siblings)
+		scsi_report_bus_reset(shost, schannel->channel);
+	spin_unlock_irqrestore(shost->host_lock, flags);
 }
 
 static int scsi_eh_schannel_total_sdevs(struct scsi_channel *schannel)
@@ -1739,24 +1879,53 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
 	rtn = hostt->eh_device_reset_handler(scmd);
 	if (rtn == SUCCESS) {
-		// pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// // pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// scsi_eh_send_tur_to_sdev(sdev, scmd);
+		// rtn = shost->hostt->queuecommand(shost, scmd);
+		// if (!rtn) {
+		// 	unsigned long time_ret;
+		// 	// pr_err("%s: %s send tur success!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// 	time_ret = wait_for_completion_timeout(&sdev->eh_wait_tur_done, 10*HZ);
+		// 	if (!time_ret) {
+		// 		scsi_eh_recover_scmd(sdev, scmd);
+		// 		mutex_lock(&sdev->state_mutex);
+		// 		scsi_device_set_state(sdev, SDEV_BLOCK);
+		// 		mutex_unlock(&sdev->state_mutex);
+		// 		// pr_err("%s: %s tur timeout!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// 		goto reset_fault;
+		// 	}
+
+		// 	if (!scsi_eh_tur_succeeded(scmd)) {
+		// 		scsi_eh_log_tur_failed(__func__, sdev, scmd);
+		// 		scsi_eh_recover_scmd(sdev, scmd);
+		// 		mutex_lock(&sdev->state_mutex);
+		// 		scsi_device_set_state(sdev, SDEV_BLOCK);
+		// 		mutex_unlock(&sdev->state_mutex);
+		// 		goto reset_fault;
+		// 	}
+
+		// 	scsi_eh_recover_scmd(sdev, scmd);
+		// 	// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// 	scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
+		// 	scsi_eh_make_sdev_running(sdev);
+		// 	// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__,
+		// 	// 	 scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
+		// 	pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// } else {
+		// 	// pr_err("%s: %s tur failure!\n", __func__, scsi_eh_locate_sdev(sdev));
+		// 	scsi_eh_recover_scmd(sdev, scmd);
+		// 	mutex_lock(&sdev->state_mutex);
+		// 	scsi_device_set_state(sdev, SDEV_BLOCK);
+		// 	mutex_unlock(&sdev->state_mutex);
+		// 	goto reset_fault;
+		// }
+		scsi_eh_report_sdev_reset(sdev);
+
+		sdev->reset_tur_retry_count = 0;
 		scsi_eh_send_tur_to_sdev(sdev, scmd);
 		rtn = shost->hostt->queuecommand(shost, scmd);
 		if (!rtn) {
-			unsigned long time_ret;
-			// pr_err("%s: %s send tur success!\n", __func__, scsi_eh_locate_sdev(sdev));
-			time_ret = wait_for_completion_timeout(&sdev->eh_wait_tur_done, 10*HZ);
-			if (!time_ret) {
-				scsi_eh_recover_scmd(sdev, scmd);
-				mutex_lock(&sdev->state_mutex);
-				scsi_device_set_state(sdev, SDEV_BLOCK);
-				mutex_unlock(&sdev->state_mutex);
-				// pr_err("%s: %s tur timeout!\n", __func__, scsi_eh_locate_sdev(sdev));
-				goto reset_fault;
-			}
-
-			if (!scsi_eh_tur_succeeded(scmd)) {
-				scsi_eh_log_tur_failed(__func__, sdev, scmd);
+			if (!scsi_eh_wait_tur_ready(sdev, scmd, __func__)) {
 				scsi_eh_recover_scmd(sdev, scmd);
 				mutex_lock(&sdev->state_mutex);
 				scsi_device_set_state(sdev, SDEV_BLOCK);
@@ -1765,14 +1934,10 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 			}
 
 			scsi_eh_recover_scmd(sdev, scmd);
-			// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
 			scsi_eh_make_sdev_running(sdev);
-			// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__,
-			// 	 scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
 			pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
 		} else {
-			// pr_err("%s: %s tur failure!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_recover_scmd(sdev, scmd);
 			mutex_lock(&sdev->state_mutex);
 			scsi_device_set_state(sdev, SDEV_BLOCK);
