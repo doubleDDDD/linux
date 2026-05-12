@@ -176,6 +176,7 @@ struct scsi_device {
 	bool is_worker_waiting;
 	bool reset_tur_wait_timeout_done;
 	unsigned int reset_tur_retry_count;
+	int reset_tur_state; /* cached final TUR state for group reset cleanup */
 	/**********************************************/
 
 	atomic_t restarts;
