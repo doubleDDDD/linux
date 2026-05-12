@@ -1750,6 +1750,21 @@ void scsi_eh_check_point(struct work_struct *work)
 	return;
 }
 
+/* caller holds shost->host_lock */
+static void scsi_eh_enqueue_pending_fault(struct Scsi_Host *shost,
+					struct scsi_device *sdev)
+{
+	if (sdev->eh_pending_fault)
+		return;
+
+	list_add_tail(&sdev->eh_pending_fault_node, &shost->eh_pending_fault_q);
+	sdev->eh_pending_fault = true;
+	sdev->eh_seq = NULL;
+
+	pr_err("%s: %s enqueue pending fault\n",
+		__func__, scsi_eh_locate_sdev(sdev));
+}
+
 /**
  * scsi_eh_scmd_add_to_sdev - add scsi cmd to sdev.
  * @scmd:	scmd to run eh on.
@@ -1759,6 +1774,9 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 	struct Scsi_Host *shost = scmd->device->host;
 	struct scsi_device *sdev = scmd->device;
 	struct scsi_target *starget = sdev->sdev_target;
+        struct scsi_eh_work_sequence *new_seq = NULL;
+        unsigned long flags;
+        bool schedule_checkpoint = false;
 
 	sdev->scmd_failed++;
 	list_add_tail(&scmd->eh_entry, &sdev->dev_eh_cmd_q);
@@ -1799,20 +1817,47 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 			/*
 			 * 在 sdev 未被接管的情况下，存在一种可能性，reset 失败后的升级（引入了一个新的数据结构 struct scsi_eh_work_sequence）
 			 */
-			if (shost->eh_work_sequence == NULL) { /* 纯粹的第一个 */
-				shost->eh_work_sequence = kzalloc(sizeof(struct scsi_eh_work_sequence), GFP_KERNEL);
-				BUG_ON(!shost->eh_work_sequence);
-				shost->eh_work_sequence->prev_eh_work_seq= NULL;
-				shost->eh_work_sequence->next_eh_work_seq = NULL;
+			// if (shost->eh_work_sequence == NULL) { /* 纯粹的第一个 */
+			// 	shost->eh_work_sequence = kzalloc(sizeof(struct scsi_eh_work_sequence), GFP_KERNEL);
+			// 	BUG_ON(!shost->eh_work_sequence);
+			// 	shost->eh_work_sequence->prev_eh_work_seq= NULL;
+			// 	shost->eh_work_sequence->next_eh_work_seq = NULL;
+			// 	atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
+			// 	queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100);
+			// } else {
+			// 	/*
+			// 	 * 存在 eh_work_sequence，判断 eh_work_sequence 的进度，即 end reset 前 or reset 后
+			// 	 * 如果是reset前，那么这个 sdev 就得等，如果是 end reset 之后，那就直接拉起新的 eh_work_sequence，判断
+			// 	 */
+			// 	pr_err("%s Unsupported Now!\n", __func__);
+			// }
+			new_seq = kzalloc(sizeof(*new_seq), GFP_ATOMIC);
+			BUG_ON(!new_seq);
+
+			new_seq->anchor_sdev = sdev;
+			new_seq->start_jiffies = jiffies;
+			new_seq->phase = SCSI_EH_SEQ_PHASE_INIT;
+			new_seq->accepting_pending = true;
+
+			spin_lock_irqsave(shost->host_lock, flags);
+			if (shost->eh_work_sequence == NULL) {
+				shost->eh_work_sequence = new_seq;
+				sdev->eh_seq = new_seq;
 				atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ / 100);
+				schedule_checkpoint = true;
+				pr_err("%s: %s start new EH sequence\n",
+					__func__, scsi_eh_locate_sdev(sdev));
+				new_seq = NULL;
 			} else {
-				/*
-				 * 存在 eh_work_sequence，判断 eh_work_sequence 的进度，即 end reset 前 or reset 后
-				 * 如果是reset前，那么这个 sdev 就得等，如果是 end reset 之后，那就直接拉起新的 eh_work_sequence，判断
-				 */
-				pr_err("%s Unsupported Now!\n", __func__);
+				scsi_eh_enqueue_pending_fault(shost, sdev);
 			}
+			spin_unlock_irqrestore(shost->host_lock, flags);
+
+			kfree(new_seq);
+			if (schedule_checkpoint)
+				queue_delayed_work(shost->eh_checkpoint,
+							&sdev->checkpoint_work,
+							HZ / 100);
 		}
 	}
 }
