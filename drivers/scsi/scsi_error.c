@@ -1980,6 +1980,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_starget(starget));
 	rtn = hostt->eh_target_reset_handler(scmd);
 	if (rtn == SUCCESS) {
+		scsi_eh_report_starget_reset(starget);
 		// pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_starget(starget));
 		/* 尝试对 target 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 target reset 就是成功的，就无法离线 target 下的所有设备 */
 		sdev_idle_in_target = 0;
@@ -1994,6 +1995,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 				continue;
 			}
 
+			_sdev->reset_tur_retry_count = 0;
 			scsi_eh_send_tur_to_sdev(_sdev, _scmd);
 			rtn = shost->hostt->queuecommand(shost, _scmd);
 			if (rtn)
@@ -2041,18 +2043,46 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 				// 	// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
 				// 	// 	__func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
 				// }
+				// switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
+				// case SCSI_EH_TUR_PENDING:
+				// 	break;
+				// case SCSI_EH_TUR_SUCCESS:
+				// 	// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(_sdev));
+				// 	sdev_tur_complete_in_target++;
+				// 	sdev_tur_done_in_target++;
+				// 	scsi_eh_recover_scmd(_sdev, _scmd);
+				// 	scsi_eh_recover_sdev(_sdev);
+				// 	scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+				// 	_sdev->reset_tur_wait_timeout_done = true;
+				// 	// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
+				// 	break;
+				// case SCSI_EH_TUR_FAILED:
+				// 	scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
+				// 	sdev_tur_done_in_target++;
+				// 	_sdev->reset_tur_wait_timeout_done = true;
+				// 	break;
+				// }
 				switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
 				case SCSI_EH_TUR_PENDING:
 					break;
 				case SCSI_EH_TUR_SUCCESS:
-					// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(_sdev));
 					sdev_tur_complete_in_target++;
 					sdev_tur_done_in_target++;
 					scsi_eh_recover_scmd(_sdev, _scmd);
 					scsi_eh_recover_sdev(_sdev);
 					scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
 					_sdev->reset_tur_wait_timeout_done = true;
-					// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
+					break;
+				case SCSI_EH_TUR_RETRY:
+					if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
+						pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+							__func__, scsi_eh_locate_sdev(_sdev),
+							_sdev->reset_tur_retry_count);
+						sdev_tur_done_in_target++;
+						_sdev->reset_tur_wait_timeout_done = true;
+					} else {
+						loop_count = 0;
+					}
 					break;
 				case SCSI_EH_TUR_FAILED:
 					scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
@@ -2060,8 +2090,6 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 					_sdev->reset_tur_wait_timeout_done = true;
 					break;
 				}
-
-
 			}
 
 			// if (sdev_tur_complete_in_target + sdev_idle_in_target == starget->total_sdevs)
@@ -2103,6 +2131,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 				scsi_eh_recover_scmd(_sdev, _scmd);
 				scsi_eh_offline_sdev(_sdev, false);
 				continue;
+			case SCSI_EH_TUR_RETRY:
 			case SCSI_EH_TUR_PENDING:
 			default:
 				scsi_eh_recover_scmd(_sdev, _scmd);
@@ -2178,6 +2207,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
 	rtn = hostt->eh_bus_reset_handler(scmd);
 	if (rtn == SUCCESS) {
+		scsi_eh_report_schannel_reset(schannel);
 		// pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_schannel(schannel));
 		/* 尝试对 schannel 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 schannel reset 就是成功的，就无法离线 schannel 下的所有设备 */
 		sdev_tur_failure_in_channel = 0;
@@ -2194,6 +2224,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 					continue;
 				}
 
+				_sdev->reset_tur_retry_count = 0;
 				scsi_eh_send_tur_to_sdev(_sdev, _scmd);
 				rtn = shost->hostt->queuecommand(shost, _scmd);
 				if (rtn)
@@ -2239,20 +2270,48 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 					// 	// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
 					// 	// 	__func__, scsi_eh_locate_sdev(_sdev), scsi_device_show_state(_sdev->sdev_state));
 					// }
+					// switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
+					// case SCSI_EH_TUR_PENDING:
+					// 	break;
+					// case SCSI_EH_TUR_SUCCESS:
+					// 	// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(_sdev));
+					// 	sdev_tur_complete_in_channel++;
+					// 	sdev_tur_done_in_channel++;
+					// 	scsi_eh_recover_sdev(_sdev);
+					// 	scsi_eh_recover_scmd(_sdev, _scmd);
+					// 	scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+					// 	_sdev->reset_tur_wait_timeout_done = true;
+					// 	// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
+					// 	// 	__func__, scsi_eh_locate_sdev(_sdev),
+					// 	// 	scsi_device_show_state(_sdev->sdev_state));
+					// 	break;
+					// case SCSI_EH_TUR_FAILED:
+					// 	scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
+					// 	sdev_tur_done_in_channel++;
+					// 	_sdev->reset_tur_wait_timeout_done = true;
+					// 	break;
+					// }
 					switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
 					case SCSI_EH_TUR_PENDING:
 						break;
 					case SCSI_EH_TUR_SUCCESS:
-						// pr_err("%s: %s tur success!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						sdev_tur_complete_in_channel++;
 						sdev_tur_done_in_channel++;
 						scsi_eh_recover_sdev(_sdev);
 						scsi_eh_recover_scmd(_sdev, _scmd);
 						scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
 						_sdev->reset_tur_wait_timeout_done = true;
-						// pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n",
-						// 	__func__, scsi_eh_locate_sdev(_sdev),
-						// 	scsi_device_show_state(_sdev->sdev_state));
+						break;
+					case SCSI_EH_TUR_RETRY:
+						if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
+							pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+								__func__, scsi_eh_locate_sdev(_sdev),
+								_sdev->reset_tur_retry_count);
+							sdev_tur_done_in_channel++;
+							_sdev->reset_tur_wait_timeout_done = true;
+						} else {
+							loop_count = 0;
+						}
 						break;
 					case SCSI_EH_TUR_FAILED:
 						scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
@@ -2301,6 +2360,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 					scsi_eh_recover_scmd(_sdev, _scmd);
 					scsi_eh_offline_sdev(_sdev, false);
 					continue;
+				case SCSI_EH_TUR_RETRY:
 				case SCSI_EH_TUR_PENDING:
 				default:
 					// pr_err("%s: %s tur timeout!\n", __func__, scsi_eh_locate_sdev(_sdev));
@@ -2384,6 +2444,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_shost(shost));
 	rtn = hostt->eh_host_reset_handler(scmd);
 	if (rtn == SUCCESS) {
+		scsi_eh_report_shost_reset(shost);
 		// pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_shost(shost));
 		/* 尝试对 host 下的所有 sdev 并行发起 tur，只要有一个 sdev 是成功的，那么这个 host reset 就是成功的，就无法离线 shost 下的所有设备 */
 		sdev_tur_failure_in_host = 0;
@@ -2401,6 +2462,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						continue;
 					}
 
+					_sdev->reset_tur_retry_count = 0;
 					scsi_eh_send_tur_to_sdev(_sdev, _scmd);
 					rtn = shost->hostt->queuecommand(shost, _scmd);
 					if (rtn)
@@ -2448,18 +2510,46 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						// 	// pr_err("%s: %s(%s) flush scmd done, sdev state=%s!\n",
 						// 	// 	__func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor, scsi_device_show_state(_sdev->sdev_state));
 						// }
+						// switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
+						// case SCSI_EH_TUR_PENDING:
+						// 	break;
+						// case SCSI_EH_TUR_SUCCESS:
+						// 	// pr_err("%s: %s(%s) tur success!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor);
+						// 	sdev_tur_complete_in_host++;
+						// 	sdev_tur_done_in_host++;
+						// 	scsi_eh_recover_sdev(_sdev);
+						// 	scsi_eh_recover_scmd(_sdev, _scmd);
+						// 	scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+						// 	_sdev->reset_tur_wait_timeout_done = true;
+						// 	// pr_err("%s: %s(%s) flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor, scsi_device_show_state(_sdev->sdev_state));
+						// 	break;
+						// case SCSI_EH_TUR_FAILED:
+						// 	scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
+						// 	sdev_tur_done_in_host++;
+						// 	_sdev->reset_tur_wait_timeout_done = true;
+						// 	break;
+						// }
 						switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
 						case SCSI_EH_TUR_PENDING:
 							break;
 						case SCSI_EH_TUR_SUCCESS:
-							// pr_err("%s: %s(%s) tur success!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor);
 							sdev_tur_complete_in_host++;
 							sdev_tur_done_in_host++;
 							scsi_eh_recover_sdev(_sdev);
 							scsi_eh_recover_scmd(_sdev, _scmd);
 							scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
 							_sdev->reset_tur_wait_timeout_done = true;
-							// pr_err("%s: %s(%s) flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor, scsi_device_show_state(_sdev->sdev_state));
+							break;
+						case SCSI_EH_TUR_RETRY:
+							if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
+								pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+									__func__, scsi_eh_locate_sdev(_sdev),
+									_sdev->reset_tur_retry_count);
+								sdev_tur_done_in_host++;
+								_sdev->reset_tur_wait_timeout_done = true;
+							} else {
+								loop_count = 0;
+							}
 							break;
 						case SCSI_EH_TUR_FAILED:
 							scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
@@ -2518,6 +2608,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						// pr_err("%s %s offline!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						scsi_eh_offline_sdev(_sdev, false);
 						continue;
+					case SCSI_EH_TUR_RETRY:
 					case SCSI_EH_TUR_PENDING:
 					default:
 						// pr_err("%s: %s tur timeout!\n", __func__, scsi_eh_locate_sdev(_sdev));
