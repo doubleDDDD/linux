@@ -1138,12 +1138,6 @@ enum scsi_eh_tur_state {
 	SCSI_EH_TUR_FAILED,
 };
 
-// static bool scsi_eh_tur_succeeded(struct scsi_cmnd *scmd)
-// {
-// 	return get_host_byte(scmd) == DID_OK &&
-// 		scsi_status_is_good(scmd->result);
-// }
-
 static enum scsi_disposition scsi_eh_eval_tur_result(struct scsi_cmnd *scmd)
 {
 	enum scsi_cmnd_submitter saved_submitter = scmd->submitter;
@@ -1203,7 +1197,7 @@ static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
 				struct scsi_cmnd *scmd,
 				const char *from)
 {
-	enum scsi_eh_tur_state tur_state;
+	enum scsi_disposition rtn;
 	unsigned long time_ret;
 
 	for (;;) {
@@ -1214,11 +1208,15 @@ static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
 			return false;
 		}
 
-		tur_state = scsi_eh_get_tur_state(sdev, scmd);
-		switch (tur_state) {
-		case SCSI_EH_TUR_SUCCESS:
+		rtn = scsi_eh_eval_tur_result(scmd);
+		pr_err("%s: %s TUR disposition=%d result=0x%x host=0x%x status=0x%x\n",
+			from, scsi_eh_locate_sdev(sdev), rtn, scmd->result,
+			get_host_byte(scmd), get_status_byte(scmd));
+
+		switch (rtn) {
+		case SUCCESS:
 			return true;
-		case SCSI_EH_TUR_RETRY:
+		case NEEDS_RETRY:
 			if (!scsi_eh_retry_tur_to_sdev(sdev, scmd)) {
 				pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
 					from, scsi_eh_locate_sdev(sdev),
@@ -1226,7 +1224,6 @@ static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
 				return false;
 			}
 			continue;
-		case SCSI_EH_TUR_FAILED:
 		default:
 			scsi_eh_log_tur_failed(from, sdev, scmd);
 			return false;
