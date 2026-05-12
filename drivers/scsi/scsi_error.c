@@ -57,6 +57,7 @@
 #define BUS_RESET_SETTLE_TIME   (10)
 #define HOST_RESET_SETTLE_TIME  (10)
 
+static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost);
 static int scsi_eh_try_stu(struct scsi_cmnd *scmd);
 static enum scsi_disposition scsi_try_to_abort_cmd(const struct scsi_host_template *,
 						   struct scsi_cmnd *);
@@ -1745,9 +1746,69 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement nothing!\n", __func__);
 		/* ::: 一旦 sdev 异常，直接离线即可，因为底层没有任何 reset 手段 */
 		scsi_eh_offline_sdev(sdev, false);
+		scsi_eh_finish_work_sequence(shost);
 	}
 
 	return;
+}
+
+static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
+{
+	struct scsi_eh_work_sequence *seq, *free_seq = NULL;
+	struct scsi_device *next_sdev = NULL, *tmp_sdev;
+	unsigned long flags;
+	bool schedule_next = false;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+
+	seq = shost->eh_work_sequence;
+	if (!seq) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		return;
+	}
+
+	if (seq->anchor_sdev)
+		seq->anchor_sdev->eh_seq = NULL;
+
+	seq->phase = SCSI_EH_SEQ_PHASE_DONE;
+	seq->accepting_pending = false;
+
+	list_for_each_entry_safe(next_sdev, tmp_sdev,
+					&shost->eh_pending_fault_q,
+					eh_pending_fault_node) {
+		list_del_init(&next_sdev->eh_pending_fault_node);
+		next_sdev->eh_pending_fault = false;
+
+		if (atomic_read(&next_sdev->eh_sdev_state) == EH_NORMAL)
+			continue;
+
+		seq->anchor_sdev = next_sdev;
+		seq->start_jiffies = jiffies;
+		seq->phase = SCSI_EH_SEQ_PHASE_INIT;
+		seq->accepting_pending = true;
+		next_sdev->eh_seq = seq;
+		atomic_set(&next_sdev->eh_sdev_state, EH_SCHEDULED);
+		schedule_next = true;
+		break;
+	}
+
+	if (!schedule_next) {
+		shost->eh_work_sequence = NULL;
+		free_seq = seq;
+		next_sdev = NULL;
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	kfree(free_seq);
+
+	if (schedule_next) {
+		pr_err("%s: %s restart EH from pending fault\n",
+			__func__, scsi_eh_locate_sdev(next_sdev));
+		queue_delayed_work(shost->eh_checkpoint,
+					&next_sdev->checkpoint_work,
+					HZ / 100);
+	}
 }
 
 /* caller holds shost->host_lock */
@@ -1979,6 +2040,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
 			scsi_eh_make_sdev_running(sdev);
 			pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
+			scsi_eh_finish_work_sequence(shost);
 		} else {
 			scsi_eh_recover_scmd(sdev, scmd);
 			mutex_lock(&sdev->state_mutex);
@@ -1993,6 +2055,7 @@ reset_fault:
 			// pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(sdev));
 			pr_err("%s: %s FINISH EH RESET, OFFLINE SDEV!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_offline_sdev(sdev, false);
+			scsi_eh_finish_work_sequence(shost);
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&sdev->eh_sdev_state, EH_RUNNING);
 			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -2184,6 +2247,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 
 		scsi_eh_recover_starget(starget); /* 恢复 starget 状态 */
 		pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_starget(starget));
+		scsi_eh_finish_work_sequence(shost);
 	} else {
 		real_reset_failure = true;
 		// pr_err("%s: %s reset fault!\n", __func__, scsi_eh_locate_starget(starget));
@@ -2198,6 +2262,7 @@ reset_fault:
 				}
 				scsi_eh_recover_starget(starget);
 				pr_err("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
+				scsi_eh_finish_work_sequence(shost);
 			} else { /* 如果不是真的失败，idle 的设备保持不变，只离线确实出问题的设备 */
 				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
 					_sdev->reset_tur_wait_timeout_done = false;
@@ -2216,6 +2281,7 @@ reset_fault:
 				}
 				scsi_eh_recover_starget(starget);
 				pr_err("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
+				scsi_eh_finish_work_sequence(shost);
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&starget->eh_starget_state, EH_RUNNING);
@@ -2415,6 +2481,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 		}
 		scsi_eh_recover_schannel(schannel); /* 恢复 schannel 状态 */
 		pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
+		scsi_eh_finish_work_sequence(shost);
 	} else {
 		real_reset_failure = true;
 		// pr_err("%s: %s reset fault!\n", __func__, scsi_eh_locate_schannel(schannel));
@@ -2431,6 +2498,7 @@ reset_fault:
 				}
 				scsi_eh_recover_schannel(schannel); /* 恢复 channel 数据结构的状态 */
 				pr_err("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
+				scsi_eh_finish_work_sequence(shost);
 			} else { /* 如果不是真的失败，idle 的设备保持不变，只离线确实出问题的设备，eh 的错误状态也需要全部恢复 */
 				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
@@ -2452,6 +2520,7 @@ reset_fault:
 				}
 				scsi_eh_recover_schannel(schannel);
 				pr_err("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
+				scsi_eh_finish_work_sequence(shost);
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&schannel->eh_schannel_state, EH_RUNNING);
@@ -2716,6 +2785,7 @@ reset_fault:
 	}
 
 	eh_scsi_restart_operations(shost);
+	scsi_eh_finish_work_sequence(shost);
 
 	pr_err("%s END\n", __func__);
 
