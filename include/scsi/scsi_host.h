@@ -542,9 +542,20 @@ enum scsi_eh_mode {
 	SCSI_EH_MODE_SDEV = 1,
 };
 
+enum scsi_eh_seq_phase {
+	SCSI_EH_SEQ_PHASE_INIT = 0,
+	SCSI_EH_SEQ_PHASE_CHECKPOINT,
+	SCSI_EH_SEQ_PHASE_RESET,
+	SCSI_EH_SEQ_PHASE_DONE,
+};
+
 struct scsi_eh_work_sequence {
 	struct scsi_eh_work_sequence *prev_eh_work_seq;
 	struct scsi_eh_work_sequence *next_eh_work_seq;
+        struct scsi_device *anchor_sdev;
+        unsigned long start_jiffies;
+        enum scsi_eh_seq_phase phase;
+        bool accepting_pending;
 };
 
 struct Scsi_Host {
@@ -577,6 +588,8 @@ struct Scsi_Host {
 	unsigned int schannel_failed;
 	unsigned int total_channels;
 	struct scsi_eh_work_sequence *eh_work_sequence;
+	struct list_head eh_pending_fault_q;
+	struct mutex eh_seq_mutex;
 	enum scsi_eh_mode eh_mode; /* 方便测试用的 */
 	/****************************************************/
 

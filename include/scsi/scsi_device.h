@@ -143,6 +143,7 @@ struct scsi_vpd {
 	unsigned char	data[];
 };
 
+struct scsi_eh_work_sequence;
 struct scsi_device {
 	struct Scsi_Host *host;
 	struct request_queue *request_queue;
@@ -168,6 +169,9 @@ struct scsi_device {
 	struct completion eh_wait_tur_done;
 	bool eh_queued;
 	struct scsi_eh_save *ses;
+	struct scsi_eh_work_sequence *eh_seq;
+	struct list_head eh_pending_fault_node;
+	bool eh_pending_fault;
 	bool idle;
 	bool is_worker_waiting;
 	bool reset_tur_wait_timeout_done;

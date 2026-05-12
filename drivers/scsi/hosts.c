@@ -419,8 +419,10 @@ struct Scsi_Host *scsi_host_alloc(const struct scsi_host_template *sht, int priv
 	INIT_LIST_HEAD(&shost->eh_sdev);
 	INIT_LIST_HEAD(&shost->eh_starget);
 	INIT_LIST_HEAD(&shost->eh_schannel);
+	INIT_LIST_HEAD(&shost->eh_pending_fault_q);
 	init_waitqueue_head(&shost->host_wait);
 	mutex_init(&shost->scan_mutex);
+	mutex_init(&shost->eh_seq_mutex);
 
 	index = ida_alloc(&host_index_ida, GFP_KERNEL);
 	if (index < 0) {
