@@ -2639,6 +2639,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 				   struct Scsi_Host *shost)
 {
 	enum scsi_disposition rtn;
+	enum scsi_eh_tur_state tur_state;
 	const struct scsi_host_template *hostt = shost->hostt;
 	struct scsi_channel *_schannel;
 	struct scsi_target *_starget;
@@ -2664,22 +2665,44 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 		sdev_idle_in_host = 0;
 		list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 			list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
-				list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-					_sdev->reset_tur_wait_timeout_done = false;
-					_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
-					if (!_sdev->idle)
-						BUG_ON(!_scmd);
+				list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {					
+					// _sdev->reset_tur_wait_timeout_done = false;
+					// _scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+					// if (!_sdev->idle)
+					// 	BUG_ON(!_scmd);
 
+					// if (_sdev->idle) {
+					// 	sdev_idle_in_host++;
+					// 	continue;
+					// }
+
+					// _sdev->reset_tur_retry_count = 0;
+					// scsi_eh_send_tur_to_sdev(_sdev, _scmd);
+					// rtn = shost->hostt->queuecommand(shost, _scmd);
+					// if (rtn)
+					// 	sdev_tur_failure_in_host++;
+					scsi_eh_tur_track_init(_sdev);
 					if (_sdev->idle) {
 						sdev_idle_in_host++;
 						continue;
 					}
 
-					_sdev->reset_tur_retry_count = 0;
+					if (WARN_ON_ONCE(list_empty(&_sdev->dev_eh_cmd_q))) {
+						_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
+						_sdev->reset_tur_wait_timeout_done = true;
+						sdev_tur_failure_in_host++;
+						continue;
+					}
+
+					_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+
 					scsi_eh_send_tur_to_sdev(_sdev, _scmd);
 					rtn = shost->hostt->queuecommand(shost, _scmd);
-					if (rtn)
+					if (rtn) {
+						_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
+						_sdev->reset_tur_wait_timeout_done = true;
 						sdev_tur_failure_in_host++;
+					}
 				}
 			}
 		}
@@ -2702,9 +2725,9 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						if (_sdev->reset_tur_wait_timeout_done) /* 对应的逻辑处理已结束 */
 							continue;
 
-						_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
-						if (!_sdev->idle)
-							BUG_ON(!_scmd);
+						// _scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+						// if (!_sdev->idle)
+						// 	BUG_ON(!_scmd);
 
 						if (_sdev->idle) {
 							sdev_idle_in_host++;
@@ -2712,6 +2735,14 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 							continue;
 						}
 
+						if (WARN_ON_ONCE(list_empty(&_sdev->dev_eh_cmd_q))) {
+							_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
+							_sdev->reset_tur_wait_timeout_done = true;
+							sdev_tur_done_in_host++;
+							continue;
+						}
+
+						_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 						// if (completion_done(&_sdev->eh_wait_tur_done)) {
 						// 	// pr_err("%s: %s(%s) tur complete!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor);
 						// 	sdev_tur_complete_in_host++;
@@ -2723,15 +2754,14 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						// 	// pr_err("%s: %s(%s) flush scmd done, sdev state=%s!\n",
 						// 	// 	__func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor, scsi_device_show_state(_sdev->sdev_state));
 						// }
-						switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
+						tur_state = scsi_eh_get_tur_state(_sdev, _scmd);
+						switch (tur_state) {
 						case SCSI_EH_TUR_PENDING:
 							break;
 						case SCSI_EH_TUR_SUCCESS:
 							sdev_tur_complete_in_host++;
 							sdev_tur_done_in_host++;
-							scsi_eh_recover_sdev(_sdev);
-							scsi_eh_recover_scmd(_sdev, _scmd);
-							scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+							_sdev->reset_tur_state = SCSI_EH_TUR_SUCCESS;
 							_sdev->reset_tur_wait_timeout_done = true;
 							break;
 						case SCSI_EH_TUR_RETRY:
@@ -2739,16 +2769,18 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 								pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
 									__func__, scsi_eh_locate_sdev(_sdev),
 									_sdev->reset_tur_retry_count);
-								sdev_tur_done_in_host++;
+								_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
 								_sdev->reset_tur_wait_timeout_done = true;
+								sdev_tur_done_in_host++;
 							} else {
 								loop_count = 0;
 							}
 							break;
 						case SCSI_EH_TUR_FAILED:
 							scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
-							sdev_tur_done_in_host++;
-							_sdev->reset_tur_wait_timeout_done = true;
+                                                        _sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
+                                                        _sdev->reset_tur_wait_timeout_done = true;
+                                                        sdev_tur_done_in_host++;
 							break;
 						}
 					}
@@ -2774,10 +2806,10 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 		list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 			list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 				list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-					_sdev->reset_tur_wait_timeout_done = false;
-					_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
-					if (!_sdev->idle)
-						BUG_ON(!_scmd);
+					// _sdev->reset_tur_wait_timeout_done = false;
+					// _scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+					// if (!_sdev->idle)
+					// 	BUG_ON(!_scmd);
 
 					if (_sdev->idle) {
 						// pr_err("%s %s(%s) idle!\n", __func__, scsi_eh_locate_sdev(_sdev), _sdev->vendor);
@@ -2785,6 +2817,12 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 						continue;
 					}
 
+					if (WARN_ON_ONCE(list_empty(&_sdev->dev_eh_cmd_q))) {
+						scsi_eh_offline_sdev(_sdev, false);
+						continue;
+					}
+
+					_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 					// if (completion_done(&_sdev->eh_wait_tur_done)) {
 					// 	// pr_err("%s %s finished!\n", __func__, scsi_eh_locate_sdev(_sdev));
 					// 	continue;
@@ -2792,22 +2830,23 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 					// scsi_eh_recover_scmd(_sdev, _scmd);
 					// // pr_err("%s %s offline!\n", __func__, scsi_eh_locate_sdev(_sdev));
 					// scsi_eh_offline_sdev(_sdev, false);
-					switch (scsi_eh_get_tur_state(_sdev, _scmd)) {
+					switch (_sdev->reset_tur_state) {
 					case SCSI_EH_TUR_SUCCESS:
-						// pr_err("%s %s finished!\n", __func__, scsi_eh_locate_sdev(_sdev));
+						scsi_eh_recover_scmd(_sdev, _scmd);
+						scsi_eh_flush_done_q(&_sdev->dev_eh_cmd_q);
+						scsi_eh_make_sdev_running(_sdev);
 						continue;
 					case SCSI_EH_TUR_FAILED:
-						scsi_eh_log_tur_failed(__func__, _sdev, _scmd);
 						scsi_eh_recover_scmd(_sdev, _scmd);
-						// pr_err("%s %s offline!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						scsi_eh_offline_sdev(_sdev, false);
 						continue;
 					case SCSI_EH_TUR_RETRY:
 					case SCSI_EH_TUR_PENDING:
 					default:
-						// pr_err("%s: %s tur timeout!\n", __func__, scsi_eh_locate_sdev(_sdev));
+						pr_err("%s: %s invalid cached TUR state=%d in host cleanup\n",
+							__func__, scsi_eh_locate_sdev(_sdev),
+							_sdev->reset_tur_state);
 						scsi_eh_recover_scmd(_sdev, _scmd);
-						// pr_err("%s %s offline!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						scsi_eh_offline_sdev(_sdev, false);
 						continue;
 					}
@@ -2844,16 +2883,19 @@ reset_fault:
 			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 				list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 					list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-						_sdev->reset_tur_wait_timeout_done = false;
-						_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
-						if (!_sdev->idle)
-							BUG_ON(!_scmd);
-
+						// _sdev->reset_tur_wait_timeout_done = false;
+						// _scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
+						// if (!_sdev->idle)
+						// 	BUG_ON(!_scmd);
 						if (_sdev->idle) {
 							scsi_eh_make_sdev_running(_sdev);
 							continue;
 						}
-
+						if (WARN_ON_ONCE(list_empty(&_sdev->dev_eh_cmd_q))) {
+							scsi_eh_offline_sdev(_sdev, false);
+							continue;
+						}
+						_scmd = list_first_entry(&_sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 						scsi_eh_recover_scmd(_sdev, _scmd);
 						// pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(_sdev));
 						scsi_eh_offline_sdev(_sdev, false);
