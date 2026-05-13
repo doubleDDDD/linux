@@ -425,6 +425,28 @@ static inline const char *scsi_device_show_state(enum scsi_device_state state)
 	}
 }
 
+static inline const char *scsi_eh_seq_phase_name(enum scsi_eh_seq_phase phase)
+{
+	switch (phase) {
+	case SCSI_EH_SEQ_PHASE_INIT:
+		return "SEQ_INIT";
+	case SCSI_EH_SEQ_PHASE_CHECKPOINT:
+		return "SEQ_CHECKPOINT";
+	case SCSI_EH_SEQ_PHASE_RESET:
+		return "SEQ_RESET";
+	case SCSI_EH_SEQ_PHASE_DONE:
+		return "SEQ_DONE";
+	default:
+		return "SEQ_UNKNOWN";
+	}
+}
+
+static inline bool scsi_eh_seq_phase_accepts_pending(enum scsi_eh_seq_phase phase)
+{
+	return phase == SCSI_EH_SEQ_PHASE_INIT ||
+		phase == SCSI_EH_SEQ_PHASE_CHECKPOINT;
+}
+
 static char sdev_locate[64] = {0};
 static char starget_locate[64] = {0};
 static char schannel_locate[64] = {0};
@@ -474,6 +496,40 @@ static char* scsi_eh_locate_shost(struct Scsi_Host *shost)
              shost->host_no);
 
     return shost_locate;
+}
+
+static void scsi_eh_seq_assert_locked(struct Scsi_Host *shost, const char *from)
+{
+	struct scsi_eh_work_sequence *seq = shost->eh_work_sequence;
+
+	if (!seq)
+		return;
+
+	if (WARN_ON_ONCE(seq->accepting_pending &&
+				!scsi_eh_seq_phase_accepts_pending(seq->phase)))
+		pr_err("%s: accepting_pending mismatch, phase=%s accepting=%d\n",
+			from, scsi_eh_seq_phase_name(seq->phase),
+			seq->accepting_pending);
+
+	if (WARN_ON_ONCE(!seq->accepting_pending &&
+				(seq->phase == SCSI_EH_SEQ_PHASE_INIT ||
+				seq->phase == SCSI_EH_SEQ_PHASE_CHECKPOINT)))
+		pr_err("%s: non-accepting sequence in open phase=%s\n",
+			from, scsi_eh_seq_phase_name(seq->phase));
+
+	if (WARN_ON_ONCE(seq->phase != SCSI_EH_SEQ_PHASE_DONE &&
+				seq->anchor_sdev == NULL))
+		pr_err("%s: active sequence lost anchor, phase=%s accepting=%d\n",
+			from, scsi_eh_seq_phase_name(seq->phase),
+			seq->accepting_pending);
+
+	if (seq->anchor_sdev &&
+		WARN_ON_ONCE(seq->anchor_sdev->eh_seq != NULL &&
+				seq->anchor_sdev->eh_seq != seq))
+		pr_err("%s: anchor %s points to another sequence, phase=%s accepting=%d\n",
+			from, scsi_eh_locate_sdev(seq->anchor_sdev),
+			scsi_eh_seq_phase_name(seq->phase),
+			seq->accepting_pending);
 }
 
 static inline const char *scsi_eh_state_name(enum scsi_eh_state state);
@@ -874,6 +930,11 @@ static bool scsi_eh_absorb_pending_faults_for_reset_scope(struct scsi_device *sd
 		spin_unlock_irqrestore(shost->host_lock, flags);
 		return false;
 	}
+
+        if (WARN_ON_ONCE(!seq->accepting_pending))
+                pr_err("%s: %s absorb pending faults while sequence is not accepting, phase=%s\n",
+                        __func__, scsi_eh_locate_sdev(sdev),
+                        scsi_eh_seq_phase_name(seq->phase));
 
 	list_for_each_entry_safe(pending, tmp, &shost->eh_pending_fault_q,
 					eh_pending_fault_node) {
@@ -1476,8 +1537,11 @@ static void scsi_eh_seq_set_phase(struct scsi_device *sdev,
 
 	spin_lock_irqsave(shost->host_lock, flags);
 	seq = shost->eh_work_sequence;
-	if (seq && seq->anchor_sdev == sdev)
+	if (seq && seq->anchor_sdev == sdev) {
 		seq->phase = phase;
+		seq->accepting_pending = scsi_eh_seq_phase_accepts_pending(phase);
+		scsi_eh_seq_assert_locked(shost, __func__);
+	}
 	spin_unlock_irqrestore(shost->host_lock, flags);
 }
 
@@ -2005,7 +2069,7 @@ static void scsi_eh_prepare_next_work_sequence_locked(
 	seq->anchor_sdev = next_sdev;
 	seq->start_jiffies = jiffies;
 	seq->phase = SCSI_EH_SEQ_PHASE_INIT;
-	seq->accepting_pending = true;
+	seq->accepting_pending = scsi_eh_seq_phase_accepts_pending(seq->phase);
 }
 
 static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
@@ -2022,6 +2086,7 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 		spin_unlock_irqrestore(shost->host_lock, flags);
 		return;
 	}
+	scsi_eh_seq_assert_locked(shost, __func__);
 
 	if (seq->anchor_sdev) {
 		seq->anchor_sdev->eh_seq = NULL;
@@ -2029,7 +2094,7 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 	}
 
 	seq->phase = SCSI_EH_SEQ_PHASE_DONE;
-	seq->accepting_pending = false;
+	seq->accepting_pending = scsi_eh_seq_phase_accepts_pending(seq->phase);
 
 	list_for_each_entry_safe(next_sdev, tmp_sdev,
 					&shost->eh_pending_fault_q,
@@ -2057,6 +2122,7 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 		next_sdev = NULL;
 	}
 
+	scsi_eh_seq_assert_locked(shost, __func__);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
 	kfree(free_seq);
@@ -2074,15 +2140,33 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 static void scsi_eh_enqueue_pending_fault(struct Scsi_Host *shost,
 					struct scsi_device *sdev)
 {
-	if (sdev->eh_pending_fault)
+	struct scsi_eh_work_sequence *seq = shost->eh_work_sequence;
+
+	if (sdev->eh_pending_fault) {
+		pr_err("%s: %s pending fault already queued, seq_phase=%s accepting=%d\n",
+			__func__, scsi_eh_locate_sdev(sdev),
+			seq ? scsi_eh_seq_phase_name(seq->phase) : "SEQ_NONE",
+			seq ? seq->accepting_pending : 0);
 		return;
+	}
+
+	if (WARN_ON_ONCE(!seq))
+		pr_err("%s: %s enqueue pending fault without active sequence\n",
+			__func__, scsi_eh_locate_sdev(sdev));
+
+	scsi_eh_seq_assert_locked(shost, __func__);
 
 	list_add_tail(&sdev->eh_pending_fault_node, &shost->eh_pending_fault_q);
 	sdev->eh_pending_fault = true;
 	sdev->eh_seq = NULL;
 
-	pr_err("%s: %s enqueue pending fault\n",
-		__func__, scsi_eh_locate_sdev(sdev));
+	pr_err("%s: %s enqueue pending fault, seq_phase=%s accepting=%d action=%s\n",
+		__func__, scsi_eh_locate_sdev(sdev),
+		seq ? scsi_eh_seq_phase_name(seq->phase) : "SEQ_NONE",
+		seq ? seq->accepting_pending : 0,
+		(seq && seq->accepting_pending) ?
+			"may_be_absorbed_by_current_sequence" :
+			"wait_next_sequence");
 }
 
 /**
@@ -2157,7 +2241,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 			new_seq->anchor_sdev = sdev;
 			new_seq->start_jiffies = jiffies;
 			new_seq->phase = SCSI_EH_SEQ_PHASE_INIT;
-			new_seq->accepting_pending = true;
+			new_seq->accepting_pending = scsi_eh_seq_phase_accepts_pending(new_seq->phase);
 
 			spin_lock_irqsave(shost->host_lock, flags);
 			if (shost->eh_work_sequence == NULL) {
@@ -2171,6 +2255,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 			} else {
 				scsi_eh_enqueue_pending_fault(shost, sdev);
 			}
+			scsi_eh_seq_assert_locked(shost, __func__);
 			spin_unlock_irqrestore(shost->host_lock, flags);
 
 			kfree(new_seq);
