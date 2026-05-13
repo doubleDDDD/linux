@@ -67,6 +67,19 @@ static const char *sdebug_version_date = "20210520";
 
 #define MY_NAME "scsi_debug"
 
+
+#define SDEBUG_EH_RESET_DEV   BIT(0)
+#define SDEBUG_EH_RESET_TGT   BIT(1)
+#define SDEBUG_EH_RESET_BUS   BIT(2)
+#define SDEBUG_EH_RESET_HOST  BIT(3)
+#define SDEBUG_EH_RESET_ALL   (SDEBUG_EH_RESET_DEV | \
+				SDEBUG_EH_RESET_TGT | \
+				SDEBUG_EH_RESET_BUS | \
+				SDEBUG_EH_RESET_HOST)
+
+static unsigned int sdebug_eh_reset_mask = SDEBUG_EH_RESET_ALL;
+static struct scsi_host_template sdebug_driver_template_runtime;
+
 /* Additional Sense Code (ASC) */
 #define NO_ADDITIONAL_SENSE 0x0
 #define OVERLAP_ATOMIC_COMMAND_ASC 0x0
@@ -7803,6 +7816,7 @@ module_param_named(zone_nr_conv, sdeb_zbc_nr_conv, int, S_IRUGO);
 module_param_named(zone_size_mb, sdeb_zbc_zone_size_mb, int, S_IRUGO);
 module_param_named(allow_restart, sdebug_allow_restart, bool, S_IRUGO | S_IWUSR);
 module_param_named(num_channels, sdebug_num_channels, int, S_IRUGO | S_IWUSR);
+module_param_named(eh_reset_mask, sdebug_eh_reset_mask, uint, S_IRUGO);
 
 MODULE_AUTHOR("Eric Youngdale + Douglas Gilbert");
 MODULE_DESCRIPTION("SCSI debug adapter driver");
@@ -7883,6 +7897,7 @@ MODULE_PARM_DESC(zone_nr_conv, "Number of conventional zones (def=1)");
 MODULE_PARM_DESC(zone_size_mb, "Zone size in MiB (def=auto)");
 MODULE_PARM_DESC(allow_restart, "Set scsi_device's allow_restart flag(def=0)");
 MODULE_PARM_DESC(num_channels, "number of channels per host to simulate(def=1)");
+MODULE_PARM_DESC(eh_reset_mask, "bitmask of implemented reset handlers: bit0=device, bit1=target, bit2=bus, bit3=host");
 
 #define SDEBUG_INFO_LEN 256
 static char sdebug_info[SDEBUG_INFO_LEN];
@@ -8027,6 +8042,7 @@ static int scsi_debug_show_info(struct seq_file *m, struct Scsi_Host *host)
 			++j;
 		}
 	}
+	seq_printf(m, "eh_reset_mask=0x%x\n", sdebug_eh_reset_mask);
 	return 0;
 }
 
@@ -9917,6 +9933,35 @@ static const struct scsi_host_template sdebug_driver_template = {
 	.target_destroy =	sdebug_target_destroy,
 };
 
+static void sdebug_build_host_template(void)
+{
+	unsigned int mask = sdebug_eh_reset_mask;
+
+	if (mask & ~SDEBUG_EH_RESET_ALL) {
+		pr_warn("scsi_debug: unknown eh_reset_mask bits 0x%lx ignored\n",
+			mask & ~SDEBUG_EH_RESET_ALL);
+		mask &= SDEBUG_EH_RESET_ALL;
+	}
+
+	sdebug_driver_template_runtime = sdebug_driver_template;
+
+	if (!(mask & SDEBUG_EH_RESET_DEV))
+		sdebug_driver_template_runtime.eh_device_reset_handler = NULL;
+	if (!(mask & SDEBUG_EH_RESET_TGT))
+		sdebug_driver_template_runtime.eh_target_reset_handler = NULL;
+	if (!(mask & SDEBUG_EH_RESET_BUS))
+		sdebug_driver_template_runtime.eh_bus_reset_handler = NULL;
+	if (!(mask & SDEBUG_EH_RESET_HOST))
+		sdebug_driver_template_runtime.eh_host_reset_handler = NULL;
+
+	pr_info("scsi_debug: eh_reset_mask=0x%x dev=%d tgt=%d bus=%d host=%d\n",
+		mask,
+		!!(mask & SDEBUG_EH_RESET_DEV),
+		!!(mask & SDEBUG_EH_RESET_TGT),
+		!!(mask & SDEBUG_EH_RESET_BUS),
+		!!(mask & SDEBUG_EH_RESET_HOST));
+}
+
 static int sdebug_driver_probe(struct device *dev)
 {
 	int error = 0;
@@ -9926,6 +9971,7 @@ static int sdebug_driver_probe(struct device *dev)
 
 	sdbg_host = dev_to_sdebug_host(dev);
 
+	sdebug_build_host_template();
 	hpnt = scsi_host_alloc(&sdebug_driver_template, 0);
 	if (NULL == hpnt) {
 		pr_err("scsi_host_alloc failed\n");
