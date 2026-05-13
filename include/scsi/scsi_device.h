@@ -189,6 +189,7 @@ struct scsi_device {
 	unsigned long last_submit_jiffies; /* 记录最近的一次提交 */
 	unsigned long last_complete_jiffies; /* 记录最近的一次完成 */
 	struct scsi_fp_estimator fp_est;
+	atomic_t fp_sample_cnt;
 	/**********************************************/
 
 	atomic_t restarts;

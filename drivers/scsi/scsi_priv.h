@@ -109,7 +109,8 @@ void new_scsi_eh_done(struct scsi_cmnd *scmd);
 #define BC_EH_FP_DEFAULT_TIMEOUT      (2 * HZ)
 #define BC_EH_FP_MIN_TIMEOUT          (HZ / 2)
 #define BC_EH_FP_MAX_TIMEOUT          (60 * HZ)
-#define BC_EH_FP_MIN_SAMPLES          32
+#define BC_EH_FP_MIN_SAMPLES          8
+#define BC_EH_FP_SAMPLE_INTERVAL      16 /* 必须是 2 的幂 */
 
 void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now);
 unsigned long scsi_fp_complete_timeout(struct scsi_device *sdev);

@@ -1539,6 +1539,7 @@ static void scsi_fp_estimator_update(struct scsi_fp_estimator *est,
 	sample = now - est->last_sample_jiffies;
 	est->last_sample_jiffies = now;
 
+	sample = DIV_ROUND_UP(sample, BC_EH_FP_SAMPLE_INTERVAL);
 	if (!sample)
 		sample = 1;
 
@@ -1629,8 +1630,13 @@ static void scsi_complete(struct request *rq)
 
 	scsi_log_completion(cmd, disposition);
 	cmd->device->last_complete_jiffies = jiffies;
-	if (disposition == SUCCESS)
-		scsi_fp_record_completion(cmd->device, jiffies);
+	if (disposition == SUCCESS) {
+		unsigned int sample_cnt;
+
+		sample_cnt = atomic_inc_return(&cmd->device->fp_sample_cnt);
+		if (!(sample_cnt & (BC_EH_FP_SAMPLE_INTERVAL - 1)))
+			scsi_fp_record_completion(cmd->device, jiffies);
+	}
 
 	switch (disposition) {
 	case SUCCESS:

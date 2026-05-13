@@ -315,6 +315,7 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	spin_lock_init(&sdev->fp_est.lock);
 	sdev->last_submit_jiffies = jiffies;
 	sdev->last_complete_jiffies = jiffies;
+	atomic_set(&sdev->fp_sample_cnt, 0);
 	INIT_WORK(&sdev->event_work, scsi_evt_thread);
 	INIT_WORK(&sdev->requeue_work, scsi_requeue_run_queue);
 	INIT_DELAYED_WORK(&sdev->checkpoint_work, scsi_eh_check_point);
