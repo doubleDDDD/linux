@@ -1228,6 +1228,7 @@ static void scsi_eh_recover_sdev(struct scsi_device *sdev)
 		sdev->idle = false;
 
 	atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
+	sdev->eh_seq = NULL;
 	sdev->is_worker_waiting = false;
 	sdev->pfaction = OFFLINE_POST_FAULT;
 	sdev->eh_reset_level = EH_SDEV;
@@ -2247,6 +2248,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 			if (shost->eh_work_sequence == NULL) {
 				shost->eh_work_sequence = new_seq;
 				sdev->eh_seq = new_seq;
+				sdev->is_worker_waiting = true;
 				atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
 				schedule_checkpoint = true;
 				pr_err("%s: %s start new EH sequence\n",
