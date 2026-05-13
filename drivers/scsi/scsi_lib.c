@@ -1586,8 +1586,14 @@ static unsigned long scsi_fp_estimator_timeout(struct scsi_fp_estimator *est)
 
 void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now)
 {
-	if (scsi_host_in_recovery(sdev->host))
+	if (scsi_host_in_recovery(sdev->host)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&sdev->fp_est.lock, flags);
+		sdev->fp_est.last_sample_jiffies = 0;
+		spin_unlock_irqrestore(&sdev->fp_est.lock, flags);
 		return;
+	}
 
 	scsi_fp_estimator_update(&sdev->fp_est, now);
 }
