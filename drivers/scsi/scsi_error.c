@@ -751,6 +751,97 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 	return need_wait;
 }
 
+static void scsi_eh_absorb_one_pending_fault_locked(struct Scsi_Host *shost,
+				struct scsi_eh_work_sequence *seq,
+				struct scsi_device *pending)
+{
+	list_del_init(&pending->eh_pending_fault_node);
+	pending->eh_pending_fault = false;
+	pending->eh_seq = seq;
+	pending->is_worker_waiting = true;
+
+	if (pending->eh_queued) {
+		list_del_init(&pending->sdev_eh_siblings);
+		pending->eh_queued = false;
+	}
+
+	atomic_set(&pending->eh_sdev_state, EH_SCHEDULED);
+
+	pr_err("%s: absorb pending fault %s into current EH sequence\n",
+		__func__, scsi_eh_locate_sdev(pending));
+}
+
+static void scsi_eh_absorb_pending_faults_to_target(struct scsi_target *starget)
+{
+	struct Scsi_Host *shost = starget->host;
+	struct scsi_eh_work_sequence *seq;
+	struct scsi_device *pending, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	seq = shost->eh_work_sequence;
+	if (!seq || !seq->anchor_sdev) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		return;
+	}
+
+	list_for_each_entry_safe(pending, tmp, &shost->eh_pending_fault_q,
+					eh_pending_fault_node) {
+		if (pending->sdev_target != starget)
+			continue;
+
+		scsi_eh_absorb_one_pending_fault_locked(shost, seq, pending);
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
+static void scsi_eh_absorb_pending_faults_to_channel(struct scsi_channel *schannel)
+{
+	struct Scsi_Host *shost = schannel->host;
+	struct scsi_eh_work_sequence *seq;
+	struct scsi_device *pending, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	seq = shost->eh_work_sequence;
+	if (!seq || !seq->anchor_sdev) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		return;
+	}
+
+	list_for_each_entry_safe(pending, tmp, &shost->eh_pending_fault_q,
+					eh_pending_fault_node) {
+		if (pending->schannel != schannel)
+			continue;
+
+		scsi_eh_absorb_one_pending_fault_locked(shost, seq, pending);
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
+static void scsi_eh_absorb_pending_faults_to_host(struct Scsi_Host *shost)
+{
+	struct scsi_eh_work_sequence *seq;
+	struct scsi_device *pending, *tmp;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	seq = shost->eh_work_sequence;
+	if (!seq || !seq->anchor_sdev) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		return;
+	}
+
+	list_for_each_entry_safe(pending, tmp, &shost->eh_pending_fault_q,
+					eh_pending_fault_node) {
+		scsi_eh_absorb_one_pending_fault_locked(shost, seq, pending);
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+}
+
 /*
  * 时间复杂度是 O(N)，调用位置均为 check point
  * 1. 能跑到这里来，就说明无论如何，得要冻结 target，但是冻结的过程本身是需要时间的（等待正常 I/O 的返回，这是同步的方式，是否能换成异步的形式呢呢？）
@@ -807,6 +898,7 @@ static enum eh_update_result update_eh_field_to_target(struct scsi_target *starg
 		atomic_set(&starget->eh_starget_state, EH_QUIESCE); /* 修改 target 状态 */
 		list_add_tail(&starget->starget_eh_siblings, &shost->eh_starget); /* 将该 target 挂到 host 上 */
 		starget->eh_queued = true;
+		scsi_eh_absorb_pending_faults_to_target(starget);
 		need_wait = eh_scan_target_firstly(starget);
 	} else { /* 并非第一次进入，即 atomic_read(&starget->eh_starget_state) == EH_QUIESCE，说明之前来过，但是 eh_to_target done 的条件不满足 */
 		need_wait = eh_scan_target_no_firstly(starget);
@@ -921,6 +1013,7 @@ static enum eh_update_result update_eh_field_to_channel(struct scsi_channel *sch
 		list_add_tail(&schannel->schannel_eh_siblings, &shost->eh_schannel); /* 将该 channel 挂到 host 上 */
 		schannel->eh_queued = true;
 		//pr_err("%s queued %s\n", __func__, scsi_eh_locate_schannel(schannel));
+		scsi_eh_absorb_pending_faults_to_channel(schannel);
 		need_wait = eh_scan_channel_firstly(schannel);
 	} else { /* 并非第一次进入，即 atomic_read(&schannel->eh_schannel_state) == EH_QUIESCE */
 		need_wait = eh_scan_channel_no_firstly(schannel);
@@ -964,7 +1057,7 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 	if (atomic_read(&shost->eh_shost_state) == EH_NORMAL) {
 		atomic_set(&shost->eh_shost_state, EH_QUIESCE);
 		// eh 域 是否在 host 优先直接看状态，不需要 check 挂了多少
-
+		scsi_eh_absorb_pending_faults_to_host(shost);
 		// 遍历 host 下所有的channel，遍历channel下的全部target，遍历target下的全部sdev，TODO 这个开销看着有点难受哦，一直在遍历，其实这里可以直接遍历所有的 sdev，待优化项
 		list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
 			if (schannel->eh_queued == true) {
