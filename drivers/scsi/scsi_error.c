@@ -606,8 +606,6 @@ static inline bool eh_scsi_device_is_busy(struct scsi_device *sdev)
 }
 
 #define FP_SUBMIT_WINDOW      (HZ / 5)   /* 200ms */
-#define FP_COMPLETE_TIMEOUT   (2 * HZ)   /* 2s */
-
 /* 
  * 该函数能够断定 sdev 有 I/O 且异常
  * 返回 true 说明 sdev 无法继续向前推进了
@@ -615,15 +613,24 @@ static inline bool eh_scsi_device_is_busy(struct scsi_device *sdev)
 static bool sdev_forward_progress_lost(struct scsi_device *sdev)
 {
 	int inflight;
+	unsigned long fp_tmo;
+
 	inflight = scsi_device_busy(sdev);
 	if (inflight == 0)
-		return false;
+		return false; /* 没有在途 I/O，就谈不上卡住不前，所以直接 false */
 
+	/* 当前虽然还有在途 I/O
+	 * 但最近一段时间根本没有持续往这个设备上灌新请求
+	 * 所以它更像是业务流量自己停下来了 / 已经快排空了
+	 * 这时不能因为暂时没 completion 就断言它“失去前向推进
+	 */
 	if (!eh_scsi_device_is_busy(sdev) && time_after(jiffies, sdev->last_submit_jiffies + FP_SUBMIT_WINDOW))
 		return false;
-
-	if (time_after(jiffies, sdev->last_complete_jiffies + FP_COMPLETE_TIMEOUT))
-		return true;   /* forward progress lost */
+	
+	fp_tmo = scsi_fp_complete_timeout(sdev);
+	/* 命令还挂着，但很久没有任何完成返回，这就像卡住了 */
+	if (time_after(jiffies, sdev->last_complete_jiffies + fp_tmo))
+		return true; /* forward progress lost */
 
 	return false;
 }

@@ -309,9 +309,12 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	INIT_LIST_HEAD(&sdev->event_list);
 	INIT_LIST_HEAD(&sdev->dev_eh_cmd_q);
 	INIT_LIST_HEAD(&sdev->sdev_eh_siblings);
-	INIT_LIST_HEAD(&sdev->eh_pending_fault_node);	
+	INIT_LIST_HEAD(&sdev->eh_pending_fault_node);
 	spin_lock_init(&sdev->list_lock);
 	mutex_init(&sdev->inquiry_mutex);
+	spin_lock_init(&sdev->fp_est.lock);
+	sdev->last_submit_jiffies = jiffies;
+	sdev->last_complete_jiffies = jiffies;
 	INIT_WORK(&sdev->event_work, scsi_evt_thread);
 	INIT_WORK(&sdev->requeue_work, scsi_requeue_run_queue);
 	INIT_DELAYED_WORK(&sdev->checkpoint_work, scsi_eh_check_point);

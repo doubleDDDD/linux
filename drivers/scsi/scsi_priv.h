@@ -106,6 +106,14 @@ bool scsi_noretry_cmd(struct scsi_cmnd *scmd);
 void scsi_eh_done(struct scsi_cmnd *scmd);
 void new_scsi_eh_done(struct scsi_cmnd *scmd);
 
+#define BC_EH_FP_DEFAULT_TIMEOUT      (2 * HZ)
+#define BC_EH_FP_MIN_TIMEOUT          (HZ / 2)
+#define BC_EH_FP_MAX_TIMEOUT          (60 * HZ)
+#define BC_EH_FP_MIN_SAMPLES          32
+
+void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now);
+unsigned long scsi_fp_complete_timeout(struct scsi_device *sdev);
+
 /* scsi_lib.c */
 extern void scsi_device_unbusy(struct scsi_device *sdev, struct scsi_cmnd *cmd);
 extern void scsi_queue_insert(struct scsi_cmnd *cmd, int reason);

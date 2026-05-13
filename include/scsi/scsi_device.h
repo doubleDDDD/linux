@@ -143,6 +143,14 @@ struct scsi_vpd {
 	unsigned char	data[];
 };
 
+struct scsi_fp_estimator {
+	spinlock_t lock;
+	unsigned long last_sample_jiffies;
+	unsigned long mean_jiffies;
+	unsigned long dev_jiffies;
+	u32 samples;
+};
+
 struct scsi_eh_work_sequence;
 struct scsi_device {
 	struct Scsi_Host *host;
@@ -177,6 +185,10 @@ struct scsi_device {
 	bool reset_tur_wait_timeout_done;
 	unsigned int reset_tur_retry_count;
 	int reset_tur_state; /* cached final TUR state for group reset cleanup */
+	/* 下面2个字段用于不依赖真正超时的情况下，评估 sdev 是否健康 */
+	unsigned long last_submit_jiffies; /* 记录最近的一次提交 */
+	unsigned long last_complete_jiffies; /* 记录最近的一次完成 */
+	struct scsi_fp_estimator fp_est;
 	/**********************************************/
 
 	atomic_t restarts;
@@ -208,10 +220,6 @@ struct scsi_device {
 	const char * vendor;		/* [back_compat] point into 'inquiry' ... */
 	const char * model;		/* ... after scan; point to static string */
 	const char * rev;		/* ... "nullnullnullnull" before scan */
-
-    /* 下面2个字段用于不依赖真正超时的情况下，评估 sdev 是否健康 */
-    unsigned long last_submit_jiffies; /* 记录最近的一次提交 */
-    unsigned long last_complete_jiffies; /* 记录最近的一次完成 */
 
 #define SCSI_DEFAULT_VPD_LEN	255	/* default SCSI VPD page size (max) */
 	struct scsi_vpd __rcu *vpd_pg0;

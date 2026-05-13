@@ -354,7 +354,11 @@ struct scsi_host_template {
 	 * cmd should be retried on.
 	 */
 	bool (*eh_should_retry_cmd)(struct scsi_cmnd *scmd);
-
+	/*
+	* Optional BC-EH forward-progress timeout hint, unit: jiffies.
+	* 0 means the LLDD does not provide one.
+	*/
+	unsigned int bc_eh_fp_timeout;
 	/* This is an optional routine that allows transport to initiate
 	 * LLD adapter or firmware reset using sysfs attribute.
 	 *

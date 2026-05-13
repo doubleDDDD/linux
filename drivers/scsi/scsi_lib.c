@@ -1521,6 +1521,93 @@ static bool scsi_mq_lld_busy(struct request_queue *q)
 	return false;
 }
 
+static void scsi_fp_estimator_update(struct scsi_fp_estimator *est,
+				unsigned long now)
+{
+	unsigned long sample;
+	unsigned long flags;
+	long diff;
+
+	spin_lock_irqsave(&est->lock, flags);
+
+	if (!est->last_sample_jiffies) {
+		est->last_sample_jiffies = now;
+		spin_unlock_irqrestore(&est->lock, flags);
+		return;
+	}
+
+	sample = now - est->last_sample_jiffies;
+	est->last_sample_jiffies = now;
+
+	if (!sample)
+		sample = 1;
+
+	if (!est->samples) {
+		est->mean_jiffies = sample;
+		est->dev_jiffies = max_t(unsigned long, 1, sample >> 1);
+		est->samples = 1;
+		spin_unlock_irqrestore(&est->lock, flags);
+		return;
+	}
+
+	diff = (long)sample - (long)est->mean_jiffies;
+	est->mean_jiffies += diff >> 3; /* EWMA 1/8 */
+
+	diff = (long)sample - (long)est->mean_jiffies;
+	if (diff < 0)
+		diff = -diff;
+	est->dev_jiffies += (diff - (long)est->dev_jiffies) >> 2; /* EWMA 1/4 */
+
+	est->samples++;
+	spin_unlock_irqrestore(&est->lock, flags);
+}
+
+static unsigned long scsi_fp_estimator_timeout(struct scsi_fp_estimator *est)
+{
+	unsigned long tmo;
+	unsigned long flags;
+
+	spin_lock_irqsave(&est->lock, flags);
+
+	if (est->samples < BC_EH_FP_MIN_SAMPLES) {
+		spin_unlock_irqrestore(&est->lock, flags);
+		return 0;
+	}
+
+	tmo = est->mean_jiffies + (est->dev_jiffies << 2);
+	tmo = clamp_t(unsigned long, tmo,
+			BC_EH_FP_MIN_TIMEOUT,
+			BC_EH_FP_MAX_TIMEOUT);
+
+	spin_unlock_irqrestore(&est->lock, flags);
+	return tmo;
+}
+
+void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now)
+{
+	if (scsi_host_in_recovery(sdev->host))
+		return;
+
+	scsi_fp_estimator_update(&sdev->fp_est, now);
+}
+
+unsigned long scsi_fp_complete_timeout(struct scsi_device *sdev)
+{
+	unsigned long tmo;
+
+	tmo = scsi_fp_estimator_timeout(&sdev->fp_est);
+	if (tmo)
+		return tmo;
+
+	tmo = sdev->host->hostt->bc_eh_fp_timeout;
+	if (tmo)
+		return clamp_t(unsigned long, tmo,
+				BC_EH_FP_MIN_TIMEOUT,
+				BC_EH_FP_MAX_TIMEOUT);
+
+	return BC_EH_FP_DEFAULT_TIMEOUT;
+}
+
 /*
  * Block layer request completion callback. May be called from interrupt
  * context.
@@ -1542,6 +1629,8 @@ static void scsi_complete(struct request *rq)
 
 	scsi_log_completion(cmd, disposition);
 	cmd->device->last_complete_jiffies = jiffies;
+	if (disposition == SUCCESS)
+		scsi_fp_record_completion(cmd->device, jiffies);
 
 	switch (disposition) {
 	case SUCCESS:
@@ -1630,6 +1719,8 @@ static int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 	trace_scsi_dispatch_cmd_start(cmd);
 	rtn = host->hostt->queuecommand(host, cmd);
 	sdev->last_submit_jiffies = jiffies;
+	if (!sdev->last_complete_jiffies)
+		sdev->last_complete_jiffies = jiffies;
 	if (rtn) {
 		atomic_dec(&cmd->device->iorequest_cnt);
 		trace_scsi_dispatch_cmd_error(cmd, rtn);
