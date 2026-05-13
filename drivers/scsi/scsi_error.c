@@ -842,6 +842,53 @@ static void scsi_eh_absorb_pending_faults_to_host(struct Scsi_Host *shost)
 	spin_unlock_irqrestore(shost->host_lock, flags);
 }
 
+static bool scsi_eh_pending_fault_matches_reset_scope(struct scsi_device *anchor,
+				struct scsi_device *pending)
+{
+	switch (anchor->eh_reset_level) {
+	case EH_SDEV:
+		return pending == anchor;
+	case EH_STARGET:
+		return pending->sdev_target == anchor->sdev_target;
+	case EH_SCHANNEL:
+		return pending->schannel == anchor->schannel;
+	case EH_SHOST:
+		return pending->host == anchor->host;
+	default:
+		return false;
+	}
+}
+
+static bool scsi_eh_absorb_pending_faults_for_reset_scope(struct scsi_device *sdev)
+{
+	struct Scsi_Host *shost = sdev->host;
+	struct scsi_eh_work_sequence *seq;
+	struct scsi_device *pending, *tmp;
+	unsigned long flags;
+	bool absorbed = false;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+
+	seq = shost->eh_work_sequence;
+	if (!seq || seq->anchor_sdev != sdev) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		return false;
+	}
+
+	list_for_each_entry_safe(pending, tmp, &shost->eh_pending_fault_q,
+					eh_pending_fault_node) {
+		if (!scsi_eh_pending_fault_matches_reset_scope(sdev, pending))
+			continue;
+
+		scsi_eh_absorb_one_pending_fault_locked(shost, seq, pending);
+		absorbed = true;
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	return absorbed;
+}
+
 /*
  * 时间复杂度是 O(N)，调用位置均为 check point
  * 1. 能跑到这里来，就说明无论如何，得要冻结 target，但是冻结的过程本身是需要时间的（等待正常 I/O 的返回，这是同步的方式，是否能换成异步的形式呢呢？）
@@ -1436,6 +1483,11 @@ static void scsi_eh_seq_set_phase(struct scsi_device *sdev,
 
 static void scsi_eh_queue_reset_work(struct scsi_device *sdev)
 {
+        if (scsi_eh_absorb_pending_faults_for_reset_scope(sdev))
+                pr_err("%s: %s absorb scope-matched pending faults before reset, level=%s\n",
+                        __func__, scsi_eh_locate_sdev(sdev),
+                        scsi_eh_reset_level_name(sdev->eh_reset_level));
+
 	scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_RESET);
 	queue_delayed_work(sdev->host->eh_process, &sdev->eh_reset_work, HZ / 100);
 }
