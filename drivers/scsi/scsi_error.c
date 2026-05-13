@@ -1977,6 +1977,37 @@ void scsi_eh_check_point(struct work_struct *work)
 	return;
 }
 
+static void scsi_eh_drop_pending_fault_locked(struct scsi_device *sdev,
+				const char *reason)
+{
+	pr_err("%s: drop stale pending fault %s, reason=%s, eh_state=%s\n",
+		__func__, scsi_eh_locate_sdev(sdev), reason,
+		scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)));
+
+	list_del_init(&sdev->eh_pending_fault_node);
+	sdev->eh_pending_fault = false;
+	sdev->eh_seq = NULL;
+
+	if (atomic_read(&sdev->eh_sdev_state) == EH_NORMAL)
+		sdev->is_worker_waiting = false;
+}
+
+static void scsi_eh_prepare_next_work_sequence_locked(
+			struct scsi_eh_work_sequence *seq,
+			struct scsi_device *next_sdev)
+{
+	list_del_init(&next_sdev->eh_pending_fault_node);
+	next_sdev->eh_pending_fault = false;
+	next_sdev->eh_seq = seq;
+	next_sdev->is_worker_waiting = true;
+	atomic_set(&next_sdev->eh_sdev_state, EH_SCHEDULED);
+
+	seq->anchor_sdev = next_sdev;
+	seq->start_jiffies = jiffies;
+	seq->phase = SCSI_EH_SEQ_PHASE_INIT;
+	seq->accepting_pending = true;
+}
+
 static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 {
 	struct scsi_eh_work_sequence *seq, *free_seq = NULL;
@@ -1992,8 +2023,10 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 		return;
 	}
 
-	if (seq->anchor_sdev)
+	if (seq->anchor_sdev) {
 		seq->anchor_sdev->eh_seq = NULL;
+		seq->anchor_sdev = NULL; /* 旧 anchor 不会悬在 seq 里 */
+	}
 
 	seq->phase = SCSI_EH_SEQ_PHASE_DONE;
 	seq->accepting_pending = false;
@@ -2001,18 +2034,19 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 	list_for_each_entry_safe(next_sdev, tmp_sdev,
 					&shost->eh_pending_fault_q,
 					eh_pending_fault_node) {
-		list_del_init(&next_sdev->eh_pending_fault_node);
-		next_sdev->eh_pending_fault = false;
-
-		if (atomic_read(&next_sdev->eh_sdev_state) == EH_NORMAL)
+		if (atomic_read(&next_sdev->eh_sdev_state) == EH_NORMAL) {
+			scsi_eh_drop_pending_fault_locked(next_sdev,
+							"already handled");
 			continue;
+		}
 
-		seq->anchor_sdev = next_sdev;
-		seq->start_jiffies = jiffies;
-		seq->phase = SCSI_EH_SEQ_PHASE_INIT;
-		seq->accepting_pending = true;
-		next_sdev->eh_seq = seq;
-		atomic_set(&next_sdev->eh_sdev_state, EH_SCHEDULED);
+		if (next_sdev->eh_seq != NULL) {
+			scsi_eh_drop_pending_fault_locked(next_sdev,
+							"already attached to sequence");
+			continue;
+		}
+
+		scsi_eh_prepare_next_work_sequence_locked(seq, next_sdev);
 		schedule_next = true;
 		break;
 	}
