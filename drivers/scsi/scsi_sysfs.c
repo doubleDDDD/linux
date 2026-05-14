@@ -389,9 +389,11 @@ store_shost_eh_mode(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
 	struct Scsi_Host *shost = class_to_shost(dev);
+	enum scsi_eh_mode old_mode;
 	enum scsi_eh_mode mode;
 	unsigned long flags;
 	int ret = -EINVAL;
+	bool mode_changed = false;
 
 	if (sysfs_streq(buf, "host"))
 		mode = SCSI_EH_MODE_HOST;
@@ -402,9 +404,19 @@ store_shost_eh_mode(struct device *dev, struct device_attribute *attr,
 
 	spin_lock_irqsave(shost->host_lock, flags);
 
+	old_mode = READ_ONCE(shost->eh_mode);
 	if (scsi_host_in_recovery(shost) || shost->host_failed) {
 		ret = -EBUSY;
 		goto out_unlock;
+	}
+
+	if (shost->eh_work_sequence ||
+		!list_empty(&shost->eh_pending_fault_q) ||
+		!list_empty(&shost->eh_sdev) ||
+		!list_empty(&shost->eh_starget) ||
+		!list_empty(&shost->eh_schannel)) {
+			ret = -EBUSY;
+			goto out_unlock;
 	}
 
 	if (mode == SCSI_EH_MODE_SDEV && !shost->eh_checkpoint) {
@@ -412,11 +424,14 @@ store_shost_eh_mode(struct device *dev, struct device_attribute *attr,
 		goto out_unlock;
 	}
 
+	mode_changed = (old_mode != mode);
 	WRITE_ONCE(shost->eh_mode, mode);
 	ret = count;
 
 out_unlock:
 	spin_unlock_irqrestore(shost->host_lock, flags);
+	if (ret > 0 && mode_changed)
+		scsi_fp_accounting_reset_host(shost);
 	return ret;
 }
 
