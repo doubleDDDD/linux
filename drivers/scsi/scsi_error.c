@@ -615,6 +615,9 @@ static bool sdev_forward_progress_lost(struct scsi_device *sdev)
 	int inflight;
 	unsigned long fp_tmo;
 
+	if (!scsi_fp_accounting_enabled(sdev->host))
+		return false;
+
 	inflight = scsi_device_busy(sdev);
 	if (inflight == 0)
 		return false; /* 没有在途 I/O，就谈不上卡住不前，所以直接 false */

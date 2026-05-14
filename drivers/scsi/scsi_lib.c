@@ -1521,6 +1521,37 @@ static bool scsi_mq_lld_busy(struct request_queue *q)
 	return false;
 }
 
+bool scsi_fp_accounting_enabled(const struct Scsi_Host *shost)
+{
+	return READ_ONCE(shost->eh_mode) == SCSI_EH_MODE_SDEV;
+}
+
+static void scsi_fp_accounting_reset_sdev(struct scsi_device *sdev,
+					unsigned long now)
+{
+	unsigned long flags;
+
+	WRITE_ONCE(sdev->last_submit_jiffies, now);
+	WRITE_ONCE(sdev->last_complete_jiffies, now);
+	atomic_set(&sdev->fp_sample_cnt, 0);
+
+	spin_lock_irqsave(&sdev->fp_est.lock, flags);
+	sdev->fp_est.last_sample_jiffies = 0;
+	sdev->fp_est.mean_jiffies = 0;
+	sdev->fp_est.dev_jiffies = 0;
+	sdev->fp_est.samples = 0;
+	spin_unlock_irqrestore(&sdev->fp_est.lock, flags);
+}
+
+void scsi_fp_accounting_reset_host(struct Scsi_Host *shost)
+{
+	struct scsi_device *sdev;
+	unsigned long now = jiffies;
+
+	shost_for_each_device(sdev, shost)
+		scsi_fp_accounting_reset_sdev(sdev, now);
+}
+
 static void scsi_fp_estimator_update(struct scsi_fp_estimator *est,
 				unsigned long now)
 {
@@ -1586,6 +1617,9 @@ static unsigned long scsi_fp_estimator_timeout(struct scsi_fp_estimator *est)
 
 void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now)
 {
+	if (!scsi_fp_accounting_enabled(sdev->host))
+		return;
+
 	if (scsi_host_in_recovery(sdev->host)) {
 		unsigned long flags;
 
@@ -1635,13 +1669,15 @@ static void scsi_complete(struct request *rq)
 		disposition = SUCCESS;
 
 	scsi_log_completion(cmd, disposition);
-	cmd->device->last_complete_jiffies = jiffies;
-	if (disposition == SUCCESS) {
-		unsigned int sample_cnt;
+	if (scsi_fp_accounting_enabled(cmd->device->host)) {
+		cmd->device->last_complete_jiffies = jiffies;
+		if (disposition == SUCCESS) {
+			unsigned int sample_cnt;
 
-		sample_cnt = atomic_inc_return(&cmd->device->fp_sample_cnt);
-		if (!(sample_cnt & (BC_EH_FP_SAMPLE_INTERVAL - 1)))
-			scsi_fp_record_completion(cmd->device, jiffies);
+			sample_cnt = atomic_inc_return(&cmd->device->fp_sample_cnt);
+			if (!(sample_cnt & (BC_EH_FP_SAMPLE_INTERVAL - 1)))
+				scsi_fp_record_completion(cmd->device, jiffies);
+		}
 	}
 
 	switch (disposition) {
@@ -1730,9 +1766,12 @@ static int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 
 	trace_scsi_dispatch_cmd_start(cmd);
 	rtn = host->hostt->queuecommand(host, cmd);
-	sdev->last_submit_jiffies = jiffies;
-	if (!sdev->last_complete_jiffies)
-		sdev->last_complete_jiffies = jiffies;
+	if (scsi_fp_accounting_enabled(host)) {
+		sdev->last_submit_jiffies = jiffies;
+		if (!READ_ONCE(sdev->last_complete_jiffies))
+			sdev->last_complete_jiffies = jiffies;
+	}
+
 	if (rtn) {
 		atomic_dec(&cmd->device->iorequest_cnt);
 		trace_scsi_dispatch_cmd_error(cmd, rtn);

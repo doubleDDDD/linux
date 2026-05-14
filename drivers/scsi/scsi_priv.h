@@ -112,6 +112,8 @@ void new_scsi_eh_done(struct scsi_cmnd *scmd);
 #define BC_EH_FP_MIN_SAMPLES          8
 #define BC_EH_FP_SAMPLE_INTERVAL      16 /* 必须是 2 的幂 */
 
+bool scsi_fp_accounting_enabled(const struct Scsi_Host *shost);
+void scsi_fp_accounting_reset_host(struct Scsi_Host *shost);
 void scsi_fp_record_completion(struct scsi_device *sdev, unsigned long now);
 unsigned long scsi_fp_complete_timeout(struct scsi_device *sdev);
 
