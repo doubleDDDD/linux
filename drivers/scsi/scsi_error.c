@@ -780,44 +780,56 @@ static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
 }
 
 int scsi_eh_checkpoint_bench_run(
-		struct Scsi_Host *shost,
-		const struct scsi_eh_checkpoint_bench_cfg *cfg,
-		struct scsi_eh_checkpoint_bench_result *res)
+	struct Scsi_Host *shost,
+	const struct scsi_eh_checkpoint_bench_cfg *cfg,
+	struct scsi_eh_checkpoint_bench_result *res)
 {
 	struct checkpoint_scan_stats stats = {};
 	struct checkpoint_scan_ctx ctx = {
 		.synthetic = true,
 		.stats = &stats,
 	};
+	u32 running_pos;
+	u64 iters;
 	u64 total_nodes;
 	u64 start_ns;
 	u64 end_ns;
 	u64 i;
 
-	if (!shost || !cfg || !res || !cfg->iters || !cfg->running_pos)
+	if (!shost || !cfg || !res)
+		return -EINVAL;
+
+	running_pos = cfg->running_pos;
+	iters = cfg->iters;
+	if (!iters || !running_pos)
 		return -EINVAL;
 
 	memset(res, 0, sizeof(*res));
-	ctx.running_pos = cfg->running_pos;
+	ctx.running_pos = running_pos;
+
+	mutex_lock(&shost->scan_mutex);
 
 	start_ns = ktime_get_ns();
-	for (i = 0; i < cfg->iters; i++) {
+	for (i = 0; i < iters; i++) {
 		ctx.leaf_visit_idx = 0;
 		__shost_is_healthy(shost, &ctx);
 	}
 	end_ns = ktime_get_ns();
 
-	total_nodes = stats.visited_sdev +
-		      stats.visited_target +
-		      stats.visited_channel;
+	mutex_unlock(&shost->scan_mutex);
 
-	res->iters = cfg->iters;
+	total_nodes = stats.visited_sdev +
+			stats.visited_target +
+			stats.visited_channel;
+
+	res->running_pos = running_pos;
+	res->iters = iters;
 	res->total_exec_ns = end_ns - start_ns;
 	res->total_visited_sdev = stats.visited_sdev;
 	res->total_visited_target = stats.visited_target;
 	res->total_visited_channel = stats.visited_channel;
-	res->visited_nodes_per_invocation = div64_u64(total_nodes, cfg->iters);
-	res->ns_per_invocation = div64_u64(res->total_exec_ns, cfg->iters);
+	res->visited_nodes_per_invocation = div64_u64(total_nodes, iters);
+	res->ns_per_invocation = div64_u64(res->total_exec_ns, iters);
 	res->ns_per_visited_node = total_nodes ?
 		div64_u64(res->total_exec_ns, total_nodes) : 0;
 

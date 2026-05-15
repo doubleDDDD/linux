@@ -56,6 +56,7 @@ struct scsi_eh_checkpoint_bench_cfg {
 };
 
 struct scsi_eh_checkpoint_bench_result {
+	u32 running_pos; /* snapshot of the last run */
 	u64 iters;
 	u64 total_exec_ns;
 	u64 total_visited_sdev;

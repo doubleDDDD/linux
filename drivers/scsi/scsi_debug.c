@@ -1534,7 +1534,7 @@ static int sdebug_checkpoint_bench_result_show(struct seq_file *m, void *p)
 	struct scsi_eh_checkpoint_bench_result *res = &sdbg_host->cp_bench_res;
 
 	mutex_lock(&sdbg_host->cp_bench_lock);
-	seq_printf(m, "running_pos=%u\n", sdbg_host->cp_bench_cfg.running_pos);
+	seq_printf(m, "running_pos=%u\n", res->running_pos);
 	seq_printf(m, "iters=%llu\n", (unsigned long long)res->iters);
 	seq_printf(m, "total_exec_ns=%llu\n",
 		   (unsigned long long)res->total_exec_ns);
@@ -1563,17 +1563,29 @@ static int sdebug_checkpoint_bench_result_open(struct inode *inode,
 }
 
 static ssize_t sdebug_checkpoint_bench_run_write(struct file *file,
-		const char __user *ubuf, size_t count, loff_t *ppos)
+	const char __user *ubuf, size_t count, loff_t *ppos)
 {
 	struct sdebug_host_info *sdbg_host = file->f_inode->i_private;
+	struct scsi_eh_checkpoint_bench_cfg cfg;
+	struct scsi_eh_checkpoint_bench_result res;
 	int ret;
 
 	mutex_lock(&sdbg_host->cp_bench_lock);
-	ret = scsi_eh_checkpoint_bench_run(sdbg_host->shost,
-					   &sdbg_host->cp_bench_cfg,
-					   &sdbg_host->cp_bench_res);
-	mutex_unlock(&sdbg_host->cp_bench_lock);
 
+	if (!sdbg_host->shost) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	cfg.running_pos = READ_ONCE(sdbg_host->cp_bench_cfg.running_pos);
+	cfg.iters = READ_ONCE(sdbg_host->cp_bench_cfg.iters);
+
+	ret = scsi_eh_checkpoint_bench_run(sdbg_host->shost, &cfg, &res);
+	if (!ret)
+		sdbg_host->cp_bench_res = res;
+
+out_unlock:
+	mutex_unlock(&sdbg_host->cp_bench_lock);
 	return ret < 0 ? ret : count;
 }
 
@@ -10208,20 +10220,27 @@ static void sdebug_driver_remove(struct device *dev)
 {
 	struct sdebug_host_info *sdbg_host;
 	struct sdebug_dev_info *sdbg_devinfo, *tmp;
+	struct Scsi_Host *shost;
 
 	sdbg_host = dev_to_sdebug_host(dev);
 
-	scsi_remove_host(sdbg_host->shost);
 	debugfs_remove(sdbg_host->debugfs_entry);
 
+	mutex_lock(&sdbg_host->cp_bench_lock);
+	shost = sdbg_host->shost;
+	sdbg_host->shost = NULL;
+	mutex_unlock(&sdbg_host->cp_bench_lock);
+
+	scsi_remove_host(shost);
+
 	list_for_each_entry_safe(sdbg_devinfo, tmp, &sdbg_host->dev_info_list,
-				 dev_list) {
+					dev_list) {
 		list_del(&sdbg_devinfo->dev_list);
 		kfree(sdbg_devinfo->zstate);
 		kfree(sdbg_devinfo);
 	}
 
-	scsi_host_put(sdbg_host->shost);
+	scsi_host_put(shost);
 }
 
 static const struct bus_type pseudo_lld_bus = {
