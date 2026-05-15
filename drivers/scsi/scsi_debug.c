@@ -9460,10 +9460,10 @@ static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 	mutex_lock(&sdebug_host_list_mutex);
 	block_unblock_all_queues(true);
 
-	if (qdepth > SDEBUG_CANQUEUE_DEFAULT) {
-		qdepth = SDEBUG_CANQUEUE_DEFAULT;
+	if (qdepth > SDEBUG_CANQUEUE_LIMIT) {
+		qdepth = SDEBUG_CANQUEUE_LIMIT;
 		pr_warn("%s: requested qdepth [%d] exceeds canqueue [%d], trim\n", __func__,
-			qdepth, SDEBUG_CANQUEUE_DEFAULT);
+			qdepth, SDEBUG_CANQUEUE_LIMIT);
 	}
 	if (qdepth < 1)
 		qdepth = 1;
