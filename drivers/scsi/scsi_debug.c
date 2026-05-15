@@ -282,10 +282,10 @@ struct tape_block {
  * /sys/class/scsi_device/<h:c:t:l>/device/queue_depth
  * but cannot exceed SDEBUG_CANQUEUE .
  */
+#define SDEBUG_CANQUEUE_LIMIT  4096
 #define SDEBUG_CANQUEUE_WORDS  3	/* a WORD is bits in a long */
-// #define SDEBUG_CANQUEUE  (SDEBUG_CANQUEUE_WORDS * BITS_PER_LONG)
-#define SDEBUG_CANQUEUE  4096
-#define DEF_CMD_PER_LUN  SDEBUG_CANQUEUE
+#define SDEBUG_CANQUEUE_DEFAULT  (SDEBUG_CANQUEUE_WORDS * BITS_PER_LONG)
+#define DEF_CMD_PER_LUN  SDEBUG_CANQUEUE_DEFAULT
 
 /* UA - Unit Attention; SA - Service Action; SSU - Start Stop Unit */
 #define F_D_IN			1	/* Data-in command (e.g. READ) */
@@ -958,7 +958,7 @@ static unsigned int sdebug_guard = DEF_GUARD;
 static int sdebug_host_max_queue;	/* per host */
 static int sdebug_lowest_aligned = DEF_LOWEST_ALIGNED;
 static int sdebug_max_luns = DEF_MAX_LUNS;
-static int sdebug_max_queue = SDEBUG_CANQUEUE;	/* per submit queue */
+static int sdebug_max_queue = SDEBUG_CANQUEUE_DEFAULT;	/* per submit queue */
 static unsigned int sdebug_medium_error_start = OPT_MEDIUM_ERR_ADDR;
 static int sdebug_medium_error_count = OPT_MEDIUM_ERR_NUM;
 static int sdebug_ndelay = DEF_NDELAY;	/* if > 0 then unit is nanoseconds */
@@ -8501,7 +8501,7 @@ static ssize_t max_queue_store(struct device_driver *ddp, const char *buf,
 	int n;
 
 	if ((count > 0) && (1 == sscanf(buf, "%d", &n)) && (n > 0) &&
-	    (n <= SDEBUG_CANQUEUE) &&
+	    (n <= SDEBUG_CANQUEUE_LIMIT) &&
 	    (sdebug_host_max_queue == 0)) {
 		mutex_lock(&sdebug_host_list_mutex);
 
@@ -9036,15 +9036,15 @@ static int __init scsi_debug_init(void)
 		return -EINVAL;
 	}
 
-	if ((sdebug_max_queue > SDEBUG_CANQUEUE) || (sdebug_max_queue < 1)) {
-		pr_err("max_queue must be in range [1, %d]\n", SDEBUG_CANQUEUE);
+	if ((sdebug_max_queue > SDEBUG_CANQUEUE_LIMIT) || (sdebug_max_queue < 1)) {
+		pr_err("max_queue must be in range [1, %d]\n", SDEBUG_CANQUEUE_LIMIT);
 		return -EINVAL;
 	}
 
-	if ((sdebug_host_max_queue > SDEBUG_CANQUEUE) ||
+	if ((sdebug_host_max_queue > SDEBUG_CANQUEUE_LIMIT) ||
 	    (sdebug_host_max_queue < 0)) {
 		pr_err("host_max_queue must be in range [0 %d]\n",
-		       SDEBUG_CANQUEUE);
+		       SDEBUG_CANQUEUE_LIMIT);
 		return -EINVAL;
 	}
 
@@ -9460,10 +9460,10 @@ static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 	mutex_lock(&sdebug_host_list_mutex);
 	block_unblock_all_queues(true);
 
-	if (qdepth > SDEBUG_CANQUEUE) {
-		qdepth = SDEBUG_CANQUEUE;
+	if (qdepth > SDEBUG_CANQUEUE_DEFAULT) {
+		qdepth = SDEBUG_CANQUEUE_DEFAULT;
 		pr_warn("%s: requested qdepth [%d] exceeds canqueue [%d], trim\n", __func__,
-			qdepth, SDEBUG_CANQUEUE);
+			qdepth, SDEBUG_CANQUEUE_DEFAULT);
 	}
 	if (qdepth < 1)
 		qdepth = 1;
@@ -9986,7 +9986,7 @@ static const struct scsi_host_template sdebug_driver_template = {
 	.eh_target_reset_handler = scsi_debug_target_reset,
 	.eh_bus_reset_handler = scsi_debug_bus_reset,
 	.eh_host_reset_handler = scsi_debug_host_reset,
-	.can_queue =		SDEBUG_CANQUEUE,
+	.can_queue =		SDEBUG_CANQUEUE_DEFAULT,
 	.this_id =		7,
 	.sg_tablesize =		SG_MAX_SEGMENTS,
 	.cmd_per_lun =		DEF_CMD_PER_LUN,
