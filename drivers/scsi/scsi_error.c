@@ -779,6 +779,23 @@ static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
 	return __shost_is_healthy(shost, &ctx);
 }
 
+static u32 checkpoint_leaf_count(struct Scsi_Host *shost)
+{
+	struct scsi_channel *schannel;
+	struct scsi_target *starget;
+	struct scsi_device *sdev;
+	u32 nr = 0;
+
+	list_for_each_entry(schannel, &shost->schannels, same_host_siblings)
+		list_for_each_entry(starget, &schannel->targets,
+					same_channel_siblings)
+			list_for_each_entry(sdev, &starget->devices,
+						same_target_siblings)
+				nr++;
+
+	return nr;
+}
+
 int scsi_eh_checkpoint_bench_run(
 	struct Scsi_Host *shost,
 	const struct scsi_eh_checkpoint_bench_cfg *cfg,
@@ -790,11 +807,13 @@ int scsi_eh_checkpoint_bench_run(
 		.stats = &stats,
 	};
 	u32 running_pos;
+	u32 nr_leaf;
 	u64 iters;
 	u64 total_nodes;
 	u64 start_ns;
 	u64 end_ns;
 	u64 i;
+	int ret = 0;
 
 	if (!shost || !cfg || !res)
 		return -EINVAL;
@@ -809,14 +828,18 @@ int scsi_eh_checkpoint_bench_run(
 
 	mutex_lock(&shost->scan_mutex);
 
+	nr_leaf = checkpoint_leaf_count(shost);
+	if (running_pos > nr_leaf) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
 	start_ns = ktime_get_ns();
 	for (i = 0; i < iters; i++) {
 		ctx.leaf_visit_idx = 0;
 		__shost_is_healthy(shost, &ctx);
 	}
 	end_ns = ktime_get_ns();
-
-	mutex_unlock(&shost->scan_mutex);
 
 	total_nodes = stats.visited_sdev +
 			stats.visited_target +
@@ -833,7 +856,9 @@ int scsi_eh_checkpoint_bench_run(
 	res->ns_per_visited_node = total_nodes ?
 		div64_u64(res->total_exec_ns, total_nodes) : 0;
 
-	return 0;
+out_unlock:
+	mutex_unlock(&shost->scan_mutex);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(scsi_eh_checkpoint_bench_run);
 
