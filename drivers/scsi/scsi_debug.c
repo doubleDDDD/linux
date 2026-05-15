@@ -283,7 +283,8 @@ struct tape_block {
  * but cannot exceed SDEBUG_CANQUEUE .
  */
 #define SDEBUG_CANQUEUE_WORDS  3	/* a WORD is bits in a long */
-#define SDEBUG_CANQUEUE  (SDEBUG_CANQUEUE_WORDS * BITS_PER_LONG)
+// #define SDEBUG_CANQUEUE  (SDEBUG_CANQUEUE_WORDS * BITS_PER_LONG)
+#define SDEBUG_CANQUEUE  4096
 #define DEF_CMD_PER_LUN  SDEBUG_CANQUEUE
 
 /* UA - Unit Attention; SA - Service Action; SSU - Start Stop Unit */
