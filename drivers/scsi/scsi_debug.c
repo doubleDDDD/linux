@@ -9463,10 +9463,10 @@ static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 	block_unblock_all_queues(true);
 
 	qdepth_cap = sdev->host->cmd_per_lun;
-        if (qdepth_cap < 1)
-                qdepth_cap = SDEBUG_CANQUEUE_DEFAULT;
-        if (qdepth_cap > SDEBUG_CANQUEUE_LIMIT)
-                qdepth_cap = SDEBUG_CANQUEUE_LIMIT;
+	if (qdepth_cap < 1)
+		qdepth_cap = SDEBUG_CANQUEUE_DEFAULT;
+	if (qdepth_cap > SDEBUG_CANQUEUE_LIMIT)
+		qdepth_cap = SDEBUG_CANQUEUE_LIMIT;
 
 	if (qdepth > qdepth_cap) {
 		requested = qdepth;
