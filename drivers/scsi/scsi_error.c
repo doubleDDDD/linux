@@ -648,8 +648,8 @@ static enum sentity_state sdev_is_healthy(struct scsi_device *sdev)
 		return SENTITY_DEV_FAULT; /* GG */
 
 	/* 2. 再检查是否有活跃的 I/O */
-    	if (!scsi_device_busy(sdev))
-        	return SENTITY_DEV_IDLE; /* idle */
+	if (!scsi_device_busy(sdev))
+		return SENTITY_DEV_IDLE; /* idle */
 
 	/* 3. 根据之前埋下的钩子判断是否有I/O正常返回 */
 	if (sdev_forward_progress_lost(sdev))

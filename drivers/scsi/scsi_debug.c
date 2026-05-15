@@ -9465,8 +9465,8 @@ static void sdebug_do_remove_host(bool the_end)
 static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 {
 	struct sdebug_dev_info *devip = sdev->hostdata;
-        int qdepth_cap;
-        int requested;
+	int qdepth_cap;
+	int requested;
 
 	if (!devip)
 		return	-ENODEV;
