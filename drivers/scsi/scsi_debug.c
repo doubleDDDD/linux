@@ -9453,6 +9453,8 @@ static void sdebug_do_remove_host(bool the_end)
 static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 {
 	struct sdebug_dev_info *devip = sdev->hostdata;
+        int qdepth_cap;
+        int requested;
 
 	if (!devip)
 		return	-ENODEV;
@@ -9460,11 +9462,19 @@ static int sdebug_change_qdepth(struct scsi_device *sdev, int qdepth)
 	mutex_lock(&sdebug_host_list_mutex);
 	block_unblock_all_queues(true);
 
-	if (qdepth > SDEBUG_CANQUEUE_LIMIT) {
-		qdepth = SDEBUG_CANQUEUE_LIMIT;
+	qdepth_cap = sdev->host->cmd_per_lun;
+        if (qdepth_cap < 1)
+                qdepth_cap = SDEBUG_CANQUEUE_DEFAULT;
+        if (qdepth_cap > SDEBUG_CANQUEUE_LIMIT)
+                qdepth_cap = SDEBUG_CANQUEUE_LIMIT;
+
+	if (qdepth > qdepth_cap) {
+		requested = qdepth;
+		qdepth = qdepth_cap;
 		pr_warn("%s: requested qdepth [%d] exceeds canqueue [%d], trim\n", __func__,
-			qdepth, SDEBUG_CANQUEUE_LIMIT);
+			requested, qdepth_cap);
 	}
+
 	if (qdepth < 1)
 		qdepth = 1;
 	if (qdepth != sdev->queue_depth)
