@@ -473,6 +473,12 @@ struct sdebug_host_info {
 	struct Scsi_Host *shost;
 	struct device dev;
 	struct list_head dev_info_list;
+	/****************/
+	struct mutex cp_bench_lock;
+	struct dentry *cp_bench_dir;
+	struct scsi_eh_checkpoint_bench_cfg cp_bench_cfg;
+	struct scsi_eh_checkpoint_bench_result cp_bench_res;
+	/****************/
 };
 
 /* There is an xarray of pointers to this struct's objects, one per host */
@@ -1520,6 +1526,67 @@ static const struct file_operations sdebug_host_reset_fail_fops = {
 	.read    = seq_read,
 	.write   = sdebug_host_reset_fail_write,
 	.release = single_release,
+};
+
+static int sdebug_checkpoint_bench_result_show(struct seq_file *m, void *p)
+{
+	struct sdebug_host_info *sdbg_host = m->private;
+	struct scsi_eh_checkpoint_bench_result *res = &sdbg_host->cp_bench_res;
+
+	mutex_lock(&sdbg_host->cp_bench_lock);
+	seq_printf(m, "running_pos=%u\n", sdbg_host->cp_bench_cfg.running_pos);
+	seq_printf(m, "iters=%llu\n", (unsigned long long)res->iters);
+	seq_printf(m, "total_exec_ns=%llu\n",
+		   (unsigned long long)res->total_exec_ns);
+	seq_printf(m, "total_visited_sdev=%llu\n",
+		   (unsigned long long)res->total_visited_sdev);
+	seq_printf(m, "total_visited_target=%llu\n",
+		   (unsigned long long)res->total_visited_target);
+	seq_printf(m, "total_visited_channel=%llu\n",
+		   (unsigned long long)res->total_visited_channel);
+	seq_printf(m, "visited_nodes_per_invocation=%llu\n",
+		   (unsigned long long)res->visited_nodes_per_invocation);
+	seq_printf(m, "ns_per_invocation=%llu\n",
+		   (unsigned long long)res->ns_per_invocation);
+	seq_printf(m, "ns_per_visited_node=%llu\n",
+		   (unsigned long long)res->ns_per_visited_node);
+	mutex_unlock(&sdbg_host->cp_bench_lock);
+
+	return 0;
+}
+
+static int sdebug_checkpoint_bench_result_open(struct inode *inode,
+					       struct file *file)
+{
+	return single_open(file, sdebug_checkpoint_bench_result_show,
+			   inode->i_private);
+}
+
+static ssize_t sdebug_checkpoint_bench_run_write(struct file *file,
+		const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct sdebug_host_info *sdbg_host = file->f_inode->i_private;
+	int ret;
+
+	mutex_lock(&sdbg_host->cp_bench_lock);
+	ret = scsi_eh_checkpoint_bench_run(sdbg_host->shost,
+					   &sdbg_host->cp_bench_cfg,
+					   &sdbg_host->cp_bench_res);
+	mutex_unlock(&sdbg_host->cp_bench_lock);
+
+	return ret < 0 ? ret : count;
+}
+
+static const struct file_operations sdebug_checkpoint_bench_run_fops = {
+	.write = sdebug_checkpoint_bench_run_write,
+	.llseek = noop_llseek,
+};
+
+static const struct file_operations sdebug_checkpoint_bench_result_fops = {
+	.open = sdebug_checkpoint_bench_result_open,
+	.read = seq_read,
+	.release = single_release,
+	.llseek = seq_lseek,
 };
 
 static int sdebug_target_alloc(struct scsi_target *starget)
@@ -10084,6 +10151,10 @@ static int sdebug_driver_probe(struct device *dev)
 		error = -ENODEV;
 		scsi_host_put(hpnt);
 	} else {
+		mutex_init(&sdbg_host->cp_bench_lock);
+		sdbg_host->cp_bench_cfg.running_pos = 1;
+		sdbg_host->cp_bench_cfg.iters = 1000000;
+
 		sdbg_host->reset_fail = false;
 		sdbg_host->debugfs_entry =
 			debugfs_create_dir(dev_name(&hpnt->shost_dev),
@@ -10092,10 +10163,31 @@ static int sdebug_driver_probe(struct device *dev)
 		if (IS_ERR_OR_NULL(sdbg_host->debugfs_entry))
 			pr_info("%s: failed to create host debugfs dir for %s\n",
 				__func__, dev_name(&hpnt->shost_dev));
-		else
+		else {
 			debugfs_create_file("fail_reset", 0600,
 						sdbg_host->debugfs_entry, sdbg_host,
 						&sdebug_host_reset_fail_fops);
+
+			sdbg_host->cp_bench_dir =
+				debugfs_create_dir("checkpoint_bench",
+						   sdbg_host->debugfs_entry);
+			if (!IS_ERR_OR_NULL(sdbg_host->cp_bench_dir)) {
+				debugfs_create_u32("running_pos", 0600,
+						   sdbg_host->cp_bench_dir,
+						   &sdbg_host->cp_bench_cfg.running_pos);
+				debugfs_create_u64("iters", 0600,
+						   sdbg_host->cp_bench_dir,
+						   &sdbg_host->cp_bench_cfg.iters);
+				debugfs_create_file("run", 0200,
+						    sdbg_host->cp_bench_dir,
+						    sdbg_host,
+						    &sdebug_checkpoint_bench_run_fops);
+				debugfs_create_file("result", 0400,
+						    sdbg_host->cp_bench_dir,
+						    sdbg_host,
+						    &sdebug_checkpoint_bench_result_fops);
+			}
+		}
 		scsi_scan_host(hpnt);
 	}
 

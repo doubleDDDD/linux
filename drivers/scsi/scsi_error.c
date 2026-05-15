@@ -27,6 +27,8 @@
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -657,15 +659,48 @@ static enum sentity_state sdev_is_healthy(struct scsi_device *sdev)
 	return SENTITY_DEV_RUNNING; /* running */
 }
 
+struct checkpoint_scan_stats {
+	u64 visited_sdev;
+	u64 visited_target;
+	u64 visited_channel;
+};
+
+struct checkpoint_scan_ctx {
+	bool synthetic;
+	u32 running_pos;
+	u32 leaf_visit_idx;
+	struct checkpoint_scan_stats *stats;
+};
+
+static inline enum sentity_state
+checkpoint_leaf_state(struct scsi_device *sdev,
+		      struct checkpoint_scan_ctx *ctx)
+{
+	if (ctx->stats)
+		ctx->stats->visited_sdev++;
+
+	if (!ctx->synthetic)
+		return sdev_is_healthy(sdev);
+
+	ctx->leaf_visit_idx++;
+	if (ctx->leaf_visit_idx == ctx->running_pos)
+		return SENTITY_DEV_RUNNING;
+
+	return SENTITY_DEV_IDLE;
+}
+
 /* 
  * 指定 target 是否健康，遍历 sdev 调用 sdev 是否健康的方法
  * 这里第一次 involve 遍历操作
  * 其实只有这几种可能性（不考虑 sdev 的热拔插，即不考虑 starget->devices 的新增），我期待的返回状态
  * 只需要返回2个状态足矣（主要是2个状态）
  */
-static enum sentity_state target_is_healthy(struct scsi_target *starget)
+static enum sentity_state __target_is_healthy(struct scsi_target *starget, struct checkpoint_scan_ctx *ctx)
 {
 	struct scsi_device *sdev;
+
+	if (ctx->stats)
+		ctx->stats->visited_target++;
 
 	/* 1. 先检查 EH 相关的状态；如果状态已经 GG 了，那就 GG；如果该 target 还在 GG 的路上，就依赖下面 */
 	if (atomic_read(&starget->eh_starget_state))
@@ -673,7 +708,7 @@ static enum sentity_state target_is_healthy(struct scsi_target *starget)
 
 	/* 2. 再通过遍历的方式确定漏网之鱼 */
 	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
-		if (sdev_is_healthy(sdev) == SENTITY_DEV_RUNNING)
+		if (checkpoint_leaf_state(sdev, ctx) == SENTITY_DEV_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
@@ -684,15 +719,18 @@ static enum sentity_state target_is_healthy(struct scsi_target *starget)
  * 指定 channel 是否正常，遍历 channel 下有无正常的 target，实际操作要遍历 host 下的所有 sdev
  * 引入了 2 重遍历，考虑该方式与直接遍历 host，判断 target id 的方式哪个更好
  */
-static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
+static enum sentity_state __channel_is_healthy(struct scsi_channel *schannel, struct checkpoint_scan_ctx *ctx)
 {
 	struct scsi_target *starget;
+
+	if (ctx->stats)
+		ctx->stats->visited_channel++;
 
 	if (atomic_read(&schannel->eh_schannel_state))
 		return SENTITY_FAULT;
 
 	list_for_each_entry(starget, &schannel->targets, same_channel_siblings)
-		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING)
+		if (__target_is_healthy(starget, ctx) == SENTITY_ANY_RUNNING)
 			return SENTITY_ANY_RUNNING;
 
 	return SENTITY_UNCERTAIN;
@@ -702,7 +740,7 @@ static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
  * 判断 host 是否有异常的 channel
  * 引入了 3 重遍历
  */
-static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
+static enum sentity_state __shost_is_healthy(struct Scsi_Host *shost, struct checkpoint_scan_ctx *ctx)
 {
 	struct scsi_channel *schannel;
 
@@ -713,12 +751,79 @@ static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
 		return SENTITY_FAULT;
 
 	list_for_each_entry(schannel, &shost->schannels, same_host_siblings) {
-		if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING)
+		if (__channel_is_healthy(schannel, ctx) == SENTITY_ANY_RUNNING)
 			return SENTITY_ANY_RUNNING;
 	}
 
 	return SENTITY_UNCERTAIN;
 }
+
+static enum sentity_state target_is_healthy(struct scsi_target *starget)
+{
+	struct checkpoint_scan_ctx ctx = {};
+
+	return __target_is_healthy(starget, &ctx);
+}
+
+static enum sentity_state channel_is_healthy(struct scsi_channel *schannel)
+{
+	struct checkpoint_scan_ctx ctx = {};
+
+	return __channel_is_healthy(schannel, &ctx);
+}
+
+static enum sentity_state shost_is_healthy(struct Scsi_Host *shost)
+{
+	struct checkpoint_scan_ctx ctx = {};
+
+	return __shost_is_healthy(shost, &ctx);
+}
+
+int scsi_eh_checkpoint_bench_run(
+		struct Scsi_Host *shost,
+		const struct scsi_eh_checkpoint_bench_cfg *cfg,
+		struct scsi_eh_checkpoint_bench_result *res)
+{
+	struct checkpoint_scan_stats stats = {};
+	struct checkpoint_scan_ctx ctx = {
+		.synthetic = true,
+		.stats = &stats,
+	};
+	u64 total_nodes;
+	u64 start_ns;
+	u64 end_ns;
+	u64 i;
+
+	if (!shost || !cfg || !res || !cfg->iters || !cfg->running_pos)
+		return -EINVAL;
+
+	memset(res, 0, sizeof(*res));
+	ctx.running_pos = cfg->running_pos;
+
+	start_ns = ktime_get_ns();
+	for (i = 0; i < cfg->iters; i++) {
+		ctx.leaf_visit_idx = 0;
+		__shost_is_healthy(shost, &ctx);
+	}
+	end_ns = ktime_get_ns();
+
+	total_nodes = stats.visited_sdev +
+		      stats.visited_target +
+		      stats.visited_channel;
+
+	res->iters = cfg->iters;
+	res->total_exec_ns = end_ns - start_ns;
+	res->total_visited_sdev = stats.visited_sdev;
+	res->total_visited_target = stats.visited_target;
+	res->total_visited_channel = stats.visited_channel;
+	res->visited_nodes_per_invocation = div64_u64(total_nodes, cfg->iters);
+	res->ns_per_invocation = div64_u64(res->total_exec_ns, cfg->iters);
+	res->ns_per_visited_node = total_nodes ?
+		div64_u64(res->total_exec_ns, total_nodes) : 0;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsi_eh_checkpoint_bench_run);
 
 static bool eh_scan_target_firstly(struct scsi_target *starget)
 {

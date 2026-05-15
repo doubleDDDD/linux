@@ -50,4 +50,25 @@ extern void scsi_eh_prep_cmnd(struct scsi_cmnd *scmd,
 extern void scsi_eh_restore_cmnd(struct scsi_cmnd* scmd,
 		struct scsi_eh_save *ses);
 
+struct scsi_eh_checkpoint_bench_cfg {
+	u32 running_pos; /* 1-based */
+	u64 iters;
+};
+
+struct scsi_eh_checkpoint_bench_result {
+	u64 iters;
+	u64 total_exec_ns;
+	u64 total_visited_sdev;
+	u64 total_visited_target;
+	u64 total_visited_channel;
+	u64 visited_nodes_per_invocation;
+	u64 ns_per_invocation;
+	u64 ns_per_visited_node;
+};
+
+extern int scsi_eh_checkpoint_bench_run(
+		struct Scsi_Host *shost,
+		const struct scsi_eh_checkpoint_bench_cfg *cfg,
+		struct scsi_eh_checkpoint_bench_result *res);
+
 #endif /* _SCSI_SCSI_EH_H */
