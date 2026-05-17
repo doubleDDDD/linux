@@ -7282,9 +7282,10 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 {
 	struct scsi_device *sdp = SCpnt->device;
 	struct sdebug_dev_info *devip = sdp->hostdata;
+#ifdef CONFIG_SCSI_BC_EH_LOG
 	u8 *cmd = SCpnt->cmnd;
 	u8 opcode = cmd[0];
-
+#endif
 	SCSI_BCEH_LOG("%s START!\n", __func__);
 
 	++num_dev_resets;
@@ -7300,7 +7301,7 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 	}
 
 	if (sdebug_fail_lun_reset(SCpnt)) {
-		scmd_printk(KERN_INFO, SCpnt, "fail lun reset 0x%x\n", opcode);
+		SCSI_BCEH_SCMD_LOG(SCpnt, "fail lun reset 0x%x\n", opcode);
 		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
 	}
@@ -7351,8 +7352,10 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	struct scsi_device *sdp = SCpnt->device;
 	struct sdebug_host_info *sdbg_host = shost_to_sdebug_host(sdp->host);
 	struct sdebug_dev_info *devip;
+#ifdef CONFIG_SCSI_BC_EH_LOG
 	u8 *cmd = SCpnt->cmnd;
 	u8 opcode = cmd[0];
+#endif
 	int k = 0;
 
 	SCSI_BCEH_LOG("%s START!\n", __func__);
@@ -7375,7 +7378,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 			    "%s: %d device(s) found in target\n", __func__, k);
 
 	if (sdebug_fail_target_reset(SCpnt)) {
-		scmd_printk(KERN_INFO, SCpnt, "fail target reset 0x%x\n",
+		SCSI_BCEH_SCMD_LOG(SCpnt, "fail target reset 0x%x\n",
 			    opcode);
 		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
@@ -7470,7 +7473,7 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 			    "%s: %d device(s) found in host\n", __func__, k);
 
 	if (sdebug_fail_bus_reset(SCpnt)) {
-			scmd_printk(KERN_INFO, SCpnt, "fail bus reset 0x%x\n", SCpnt->cmnd[0]);
+			SCSI_BCEH_SCMD_LOG(SCpnt, "fail bus reset 0x%x\n", SCpnt->cmnd[0]);
 			SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 			return FAILED;
 	}
@@ -7537,7 +7540,7 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	mutex_unlock(&sdebug_host_list_mutex);
 	stop_all_queued();
 	if (host_fail) {
-		scmd_printk(KERN_INFO, SCpnt, "fail host reset 0x%x\n", SCpnt->cmnd[0]);
+		SCSI_BCEH_SCMD_LOG(SCpnt, "fail host reset 0x%x\n", SCpnt->cmnd[0]);
 		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
 	}

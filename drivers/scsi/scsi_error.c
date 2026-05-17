@@ -2402,6 +2402,8 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 		// 			&next_sdev->checkpoint_work,
 		// 			HZ / 100);
 		scsi_eh_queue_checkpoint_work(next_sdev, HZ / 100);
+	} else {
+		pr_err("%s BC-EH END! end_ns=%llu\n", __func__, ktime_get_ns());
 	}
 }
 
@@ -2460,7 +2462,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 		scsi_device_set_state(sdev, SDEV_BLOCK);
 		mutex_unlock(&sdev->state_mutex);
 		atomic_set(&sdev->eh_sdev_state, EH_QUIESCE);
-		pr_err("%s BC-EH: set sdev to EH_QUIESCE!\n", __func__);
+		pr_err("%s BC-EH: set sdev to EH_QUIESCE! start_ns=%llu\n", __func__, ktime_get_ns());
 	}
 	// pr_err("%s: %s vendor = %s, busy,scmd_failed(%d, %d)\n",
 	// 	__func__, scsi_eh_locate_sdev(sdev), sdev->vendor, scsi_device_busy(sdev), sdev->scmd_failed);
@@ -3776,7 +3778,7 @@ static void scsi_report_sense(struct scsi_device *sdev,
 			 * of runtime PM.
 			 */
 			if (!sdev->silence_suspend)
-				sdev_printk(KERN_WARNING, sdev,
+				SCSI_BCEH_SDEV_LOG(sdev,
 					    "Power-on or device reset occurred\n");
 		}
 
@@ -5613,7 +5615,7 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 	list_splice_init(&shost->eh_cmd_q, &eh_work_q);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
-	pr_err("%s START! jiffies=%lu ms=%u\n", __func__, jiffies, jiffies_to_msecs(jiffies));
+	pr_err("%s START! start_ns=%llu\n", __func__, ktime_get_ns());
 
 	SCSI_LOG_ERROR_RECOVERY(1, scsi_eh_prt_fail_stats(shost, &eh_work_q));
 
@@ -5625,7 +5627,7 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 		shost->last_reset = 0;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 	scsi_eh_flush_done_q(&eh_done_q);
-	pr_err("%s END! jiffies=%lu ms=%u\n", __func__, jiffies, jiffies_to_msecs(jiffies));
+	pr_err("%s END! end_ns=%llu\n", __func__, ktime_get_ns());
 }
 
 /**
