@@ -56,6 +56,20 @@ do {								\
 #define SCSI_CHECK_LOGGING(SHIFT, BITS, LEVEL, CMD) do { } while (0)
 #endif /* CONFIG_SCSI_LOGGING */
 
+#ifdef CONFIG_SCSI_BC_EH_LOG
+#define SCSI_BCEH_LOG(fmt, ...) pr_err(fmt, ##__VA_ARGS__)
+#define SCSI_BCEH_SDEV_LOG(sdev, fmt, ...) sdev_printk(KERN_ERR, sdev, fmt, ##__VA_ARGS__)
+#define SCSI_BCEH_STARGET_LOG(starget, fmt, ...) starget_printk(KERN_ERR, starget, fmt, ##__VA_ARGS__)
+#define SCSI_BCEH_SHOST_LOG(shost, fmt, ...) shost_printk(KERN_ERR, shost, fmt, ##__VA_ARGS__)
+#define SCSI_BCEH_SCMD_LOG(scmd, fmt, a...) scmd_printk(KERN_ERR, scmd, "BC-EH: " fmt, ##a)
+#else
+#define SCSI_BCEH_LOG(fmt, ...) do { } while (0)
+#define SCSI_BCEH_SDEV_LOG(sdev, fmt, ...) do { } while (0)
+#define SCSI_BCEH_STARGET_LOG(starget, fmt, ...) do { } while (0)
+#define SCSI_BCEH_SHOST_LOG(shost, fmt, ...) do { } while (0)
+#define SCSI_BCEH_SCMD_LOG(scmd, fmt, a...) do { } while (0)
+#endif
+
 /*
  * These are the macros that are actually used throughout the code to
  * log events.  If logging isn't enabled, they are no-ops and will be

@@ -168,7 +168,7 @@ scmd_eh_abort_handler(struct work_struct *work)
 	SCSI_LOG_ERROR_RECOVERY(3,
 			scmd_printk(KERN_INFO, scmd,
 				    "aborting command\n"));
-	scmd_printk(KERN_INFO, scmd, "aborting command\n");
+	// scmd_printk(KERN_INFO, scmd, "aborting command\n");
 	rtn = scsi_try_to_abort_cmd(shost->hostt, scmd);
 	if (rtn != SUCCESS) {
 		SCSI_LOG_ERROR_RECOVERY(3,
@@ -176,10 +176,10 @@ scmd_eh_abort_handler(struct work_struct *work)
 				    "cmd abort %s\n",
 				    (rtn == FAST_IO_FAIL) ?
 				    "not send" : "failed"));
-		scmd_printk(KERN_INFO, scmd,
-				"cmd abort %s\n",
-				(rtn == FAST_IO_FAIL) ?
-				"not send" : "failed");
+		// scmd_printk(KERN_INFO, scmd,
+		// 		"cmd abort %s\n",
+		// 		(rtn == FAST_IO_FAIL) ?
+		// 		"not send" : "failed");
 		goto out;
 	}
 	set_host_byte(scmd, DID_TIME_OUT);
@@ -539,6 +539,7 @@ void scsi_eh_cancel_sdev(struct scsi_device *sdev)
 		scsi_eh_finish_work_sequence(shost);
 }
 
+#ifdef CONFIG_SCSI_BCEH_LOG
 static char sdev_locate[64] = {0};
 static char starget_locate[64] = {0};
 static char schannel_locate[64] = {0};
@@ -589,6 +590,7 @@ static char* scsi_eh_locate_shost(struct Scsi_Host *shost)
 
     return shost_locate;
 }
+#endif
 
 static void scsi_eh_seq_assert_locked(struct Scsi_Host *shost, const char *from)
 {
@@ -599,26 +601,26 @@ static void scsi_eh_seq_assert_locked(struct Scsi_Host *shost, const char *from)
 
 	if (WARN_ON_ONCE(seq->accepting_pending &&
 				!scsi_eh_seq_phase_accepts_pending(seq->phase)))
-		pr_err("%s: accepting_pending mismatch, phase=%s accepting=%d\n",
+		SCSI_BCEH_LOG("%s: accepting_pending mismatch, phase=%s accepting=%d\n",
 			from, scsi_eh_seq_phase_name(seq->phase),
 			seq->accepting_pending);
 
 	if (WARN_ON_ONCE(!seq->accepting_pending &&
 				(seq->phase == SCSI_EH_SEQ_PHASE_INIT ||
 				seq->phase == SCSI_EH_SEQ_PHASE_CHECKPOINT)))
-		pr_err("%s: non-accepting sequence in open phase=%s\n",
+		SCSI_BCEH_LOG("%s: non-accepting sequence in open phase=%s\n",
 			from, scsi_eh_seq_phase_name(seq->phase));
 
 	if (WARN_ON_ONCE(seq->phase != SCSI_EH_SEQ_PHASE_DONE &&
 				seq->anchor_sdev == NULL))
-		pr_err("%s: active sequence lost anchor, phase=%s accepting=%d\n",
+		SCSI_BCEH_LOG("%s: active sequence lost anchor, phase=%s accepting=%d\n",
 			from, scsi_eh_seq_phase_name(seq->phase),
 			seq->accepting_pending);
 
 	if (seq->anchor_sdev &&
 		WARN_ON_ONCE(seq->anchor_sdev->eh_seq != NULL &&
 				seq->anchor_sdev->eh_seq != seq))
-		pr_err("%s: anchor %s points to another sequence, phase=%s accepting=%d\n",
+		SCSI_BCEH_LOG("%s: anchor %s points to another sequence, phase=%s accepting=%d\n",
 			from, scsi_eh_locate_sdev(seq->anchor_sdev),
 			scsi_eh_seq_phase_name(seq->phase),
 			seq->accepting_pending);
@@ -958,7 +960,7 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 	struct scsi_channel *schannel = starget->schannel;
 	bool need_wait = false;
 
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
 
 	/* 
 	* 遍历全部 sdev
@@ -1005,7 +1007,7 @@ static bool eh_scan_target_firstly(struct scsi_target *starget)
 		// 	 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	return need_wait;
 }
@@ -1016,7 +1018,7 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 	struct scsi_channel *schannel = starget->schannel;
 	bool need_wait = false;
 
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
 
 	list_for_each_entry(sdev, &starget->devices, same_target_siblings) {
 		if (atomic_read(&sdev->eh_sdev_state) == EH_SCHEDULED)
@@ -1044,7 +1046,7 @@ static bool eh_scan_target_no_firstly(struct scsi_target *starget)
 		// 	 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	return need_wait;
 }
@@ -1065,7 +1067,7 @@ static void scsi_eh_absorb_one_pending_fault_locked(struct Scsi_Host *shost,
 
 	atomic_set(&pending->eh_sdev_state, EH_SCHEDULED);
 
-	pr_err("%s: absorb pending fault %s into current EH sequence\n",
+	SCSI_BCEH_LOG("%s: absorb pending fault %s into current EH sequence\n",
 		__func__, scsi_eh_locate_sdev(pending));
 }
 
@@ -1174,7 +1176,7 @@ static bool scsi_eh_absorb_pending_faults_for_reset_scope(struct scsi_device *sd
 	}
 
         if (WARN_ON_ONCE(!seq->accepting_pending))
-                pr_err("%s: %s absorb pending faults while sequence is not accepting, phase=%s\n",
+                SCSI_BCEH_LOG("%s: %s absorb pending faults while sequence is not accepting, phase=%s\n",
                         __func__, scsi_eh_locate_sdev(sdev),
                         scsi_eh_seq_phase_name(seq->phase));
 
@@ -1242,7 +1244,7 @@ static enum eh_update_result update_eh_field_to_target(struct scsi_target *starg
 	if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED || atomic_read(&starget->eh_starget_state) == EH_RUNNING) /* 可以直接升级到 target，如果已经running了，reset 线程自然会拦截 */
 		return DONE;
 
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_starget(starget));
 
 	if (atomic_read(&starget->eh_starget_state) == EH_NORMAL) { /* 第一次进入 */
 		atomic_set(&starget->eh_starget_state, EH_QUIESCE); /* 修改 target 状态 */
@@ -1263,7 +1265,7 @@ static enum eh_update_result update_eh_field_to_target(struct scsi_target *starg
 		// 	 __func__, scsi_eh_locate_starget(starget), schannel->starget_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_starget(starget), need_wait);
 
 	if (need_wait)
 		return NEED_WAIT_IO_DONE;
@@ -1277,7 +1279,7 @@ static bool eh_scan_channel_firstly(struct scsi_channel *schannel)
 	struct Scsi_Host *shost = schannel->host;
 	bool need_wait = false;
 
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
 
 	/* 
 	* 遍历全部 target
@@ -1310,7 +1312,7 @@ static bool eh_scan_channel_firstly(struct scsi_channel *schannel)
 		// 	 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
 
 	return need_wait;
 }
@@ -1321,7 +1323,7 @@ static bool eh_scan_channel_no_firstly(struct scsi_channel *schannel)
 	struct Scsi_Host *shost = schannel->host;
 	bool need_wait = false;
 
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
 
 	list_for_each_entry(starget, &schannel->targets, same_channel_siblings) {
 		if (atomic_read(&starget->eh_starget_state) == EH_SCHEDULED)
@@ -1340,7 +1342,7 @@ static bool eh_scan_channel_no_firstly(struct scsi_channel *schannel)
 		// 	 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
 
 	return need_wait;
 }
@@ -1356,7 +1358,7 @@ static enum eh_update_result update_eh_field_to_channel(struct scsi_channel *sch
 	if (atomic_read(&schannel->eh_schannel_state) == EH_SCHEDULED || atomic_read(&schannel->eh_schannel_state) == EH_RUNNING)
 		return DONE;
 	
-	pr_err("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
+	SCSI_BCEH_LOG("%s %s START\n", __func__, scsi_eh_locate_schannel(schannel));
 
 	if (atomic_read(&schannel->eh_schannel_state) == EH_NORMAL) {
 		atomic_set(&schannel->eh_schannel_state, EH_QUIESCE); /* 修改 channel 状态 */
@@ -1377,7 +1379,7 @@ static enum eh_update_result update_eh_field_to_channel(struct scsi_channel *sch
 		// 	 __func__, scsi_eh_locate_schannel(schannel), shost->schannel_failed);
 	}
 
-	pr_err("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
+	SCSI_BCEH_LOG("%s %s END, need wait(%d)\n", __func__, scsi_eh_locate_schannel(schannel), need_wait);
 
 	if (need_wait)
 		return NEED_WAIT_IO_DONE;
@@ -1397,7 +1399,7 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 	if (atomic_read(&shost->eh_shost_state) == EH_SCHEDULED || atomic_read(&shost->eh_shost_state) == EH_RUNNING)
 		return DONE;
 	
-	pr_err("%s START\n", __func__);
+	SCSI_BCEH_LOG("%s START\n", __func__);
 
 	/* 先阻塞 host */
 	spin_lock_irqsave(shost->host_lock, flags);
@@ -1438,7 +1440,7 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 	if (shost->total_channels == shost->schannel_failed) // 当 host 下面所有的 channel 都 EH_SCHEDULED 的时候，host 也应该迭代到 EH_SCHEDULED
 		atomic_set(&shost->eh_shost_state, EH_SCHEDULED);
 	
-	pr_err("%s END, need wait(%d)\n", __func__, need_wait);
+	SCSI_BCEH_LOG("%s END, need wait(%d)\n", __func__, need_wait);
 
 	if (need_wait)
 		return NEED_WAIT_IO_DONE;
@@ -1532,9 +1534,9 @@ static void scsi_eh_offline_sdev(struct scsi_device *sdev, bool need_run_hw_queu
 
 	scsi_eh_recover_sdev(sdev);
 
-	pr_err("%s: %s offline!\n", __func__, scsi_eh_locate_sdev(sdev));
+	SCSI_BCEH_LOG("%s: %s offline!\n", __func__, scsi_eh_locate_sdev(sdev));
 	scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
-	pr_err("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
+	SCSI_BCEH_LOG("%s: %s sdev flush scmd done, sdev state=%s!\n", __func__, scsi_eh_locate_sdev(sdev), scsi_device_show_state(sdev->sdev_state));
 }
 
 static void scsi_eh_make_sdev_running(struct scsi_device *sdev)
@@ -1566,7 +1568,7 @@ static void scsi_eh_send_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd 
 	scsi_eh_prep_cmnd(scmd, sdev->ses, tur_command, 6, 0);
 	scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
 	init_completion(&sdev->eh_wait_tur_done);
-	pr_err("%s: SEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
+	SCSI_BCEH_LOG("%s: SEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
 }
 
 static void scsi_eh_resend_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmnd *scmd)
@@ -1581,7 +1583,7 @@ static void scsi_eh_resend_tur_to_sdev(struct scsi_device *sdev, struct scsi_cmn
 	memset(scmd->sense_buffer, 0, SCSI_SENSE_BUFFERSIZE);
 	scmd->submitter = SUBMITTED_BY_NEW_SCSI_ERROR_HANDLER;
 	init_completion(&sdev->eh_wait_tur_done);
-	pr_err("%s: RESEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
+	SCSI_BCEH_LOG("%s: RESEND TUR to %s DONE!\n", __func__, scsi_eh_locate_sdev(sdev));
 }
 
 static inline void scsi_eh_tur_track_init(struct scsi_device *sdev)
@@ -1632,7 +1634,7 @@ static void scsi_eh_log_tur_failed(const char *from,
 				struct scsi_device *sdev,
 				struct scsi_cmnd *scmd)
 {
-	pr_err("%s: %s TUR failed, result=0x%x host=0x%x status=0x%x\n",
+	SCSI_BCEH_LOG("%s: %s TUR failed, result=0x%x host=0x%x status=0x%x\n",
 		from, scsi_eh_locate_sdev(sdev), scmd->result,
 		get_host_byte(scmd), get_status_byte(scmd));
 }
@@ -1664,12 +1666,12 @@ static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
 		time_ret = wait_for_completion_timeout(&sdev->eh_wait_tur_done,
 							SCSI_EH_RESET_TUR_TIMEOUT);
 		if (!time_ret) {
-			pr_err("%s: %s TUR timeout!\n", from, scsi_eh_locate_sdev(sdev));
+			SCSI_BCEH_LOG("%s: %s TUR timeout!\n", from, scsi_eh_locate_sdev(sdev));
 			return false;
 		}
 
 		rtn = scsi_eh_eval_tur_result(scmd);
-		pr_err("%s: %s TUR disposition=%d result=0x%x host=0x%x status=0x%x\n",
+		SCSI_BCEH_LOG("%s: %s TUR disposition=%d result=0x%x host=0x%x status=0x%x\n",
 			from, scsi_eh_locate_sdev(sdev), rtn, scmd->result,
 			get_host_byte(scmd), get_status_byte(scmd));
 
@@ -1678,7 +1680,7 @@ static bool scsi_eh_wait_tur_ready(struct scsi_device *sdev,
 			return true;
 		case NEEDS_RETRY:
 			if (!scsi_eh_retry_tur_to_sdev(sdev, scmd)) {
-				pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+				SCSI_BCEH_LOG("%s: %s TUR retry failed or exhausted, retries=%u\n",
 					from, scsi_eh_locate_sdev(sdev),
 					sdev->reset_tur_retry_count);
 				return false;
@@ -1787,7 +1789,7 @@ static void scsi_eh_queue_reset_work(struct scsi_device *sdev)
                 return;
 
         if (scsi_eh_absorb_pending_faults_for_reset_scope(sdev))
-                pr_err("%s: %s absorb scope-matched pending faults before reset, level=%s\n",
+                SCSI_BCEH_LOG("%s: %s absorb scope-matched pending faults before reset, level=%s\n",
                         __func__, scsi_eh_locate_sdev(sdev),
                         scsi_eh_reset_level_name(sdev->eh_reset_level));
 
@@ -1807,7 +1809,7 @@ void scsi_eh_check_point(struct work_struct *work)
 	if (unlikely(scsi_eh_in_teardown(sdev)))
 		return;
 
-	pr_err("%s check_point wakeup!\n", __func__);
+	SCSI_BCEH_LOG("%s check_point wakeup!\n", __func__);
 	scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
 	// queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 	/* 底层驱动实现 handler 的可能性不同，这里需要评估策略，最简单的就是一个大case，根据底层不同的实现先分开 */
@@ -1819,7 +1821,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  && 实际上无论返回什么，都仅能够 do sdev reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
 		// 讨论 target 是否健康没有意义，只能执行 sdev reset，成功万事大吉，失败直接离线
-		pr_err("%s Implement eh_device_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler\n", __func__);
 		sdev->pfaction = OFFLINE_POST_FAULT; // 其实是这一刻的现状
 		sdev->eh_reset_level = EH_SDEV;
 		// eh_host_status_show(sdev);
@@ -1833,7 +1835,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*   && 实际上无论返回什么，都仅能够 do target reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
 		// 讨论 channel 是否健康没有意义，只能执行 starget reset，成功万事大吉，失败直接离线
-		pr_err("%s Implement eh_target_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_target_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 			// pr_err("%s update_eh_field_to_target need wait I/O done\n", __func__);
 			// eh_host_status_show(sdev);
@@ -1855,7 +1857,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  && 实际上无论返回什么，都仅能够 do host reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
 		// 讨论 host 是否健康没有意义，只能执行 schannel reset，成功万事大吉，失败直接离线
-		pr_err("%s Implement eh_bus_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_bus_reset_handler\n", __func__);
 		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
 			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			scsi_eh_queue_checkpoint_work(sdev, HZ);
@@ -1867,7 +1869,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		}
 	} else if ((hostt->eh_host_reset_handler) && (!hostt->eh_device_reset_handler && !hostt->eh_target_reset_handler && !hostt->eh_bus_reset_handler)) {
 		/* ::: 只要有异常 sdev，直接阻塞整个 Host（**这个是host的选择没有办法**），异常 host 功德圆满 GG 后，直接执行 host reset，无需考虑任何返回值等 */
-		pr_err("%s Implement eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
 			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			scsi_eh_queue_checkpoint_work(sdev, HZ);
@@ -1885,7 +1887,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*     2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel。&& 此时只能尝试 do target reset，失败离线即可。
 		*     && 实际上无论返回什么，都仅能够 do target reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_target_reset_handler\n", __func__);
 		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
 			sdev->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_SDEV;
@@ -1911,7 +1913,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉; 
 		*  2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。&& 此时只能尝试 do bus reset，失败离线即可。&& 实际上无论返回什么，都仅能够 do bu reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_bus_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
 			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
 				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -1941,7 +1943,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  2. 其它（**无法明确错误范围仅在 sdev**），但是可以无代价阻塞 target，这种情况下可以认为 target 异常，但是 target reset 未实现，只能退而求其次，先 do sdev reset（**仅 sdev GG 的可能性是存在的**），如果成功，完事大吉。如果失败，则明确至少是 target 异常。
 		*  **开始统一逻辑**，target异常，仅有 host reset 方法，直接阻塞 host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_host_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
 			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
 				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -1974,7 +1976,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  && 此时只能尝试 do bus reset，失败离线即可。 
 		*  && 实际上无论返回什么，都仅能够 do bus reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
-		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			scsi_eh_queue_checkpoint_work(sdev, HZ);
@@ -2002,7 +2004,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel,这种情况下认为 channel 异常，但是 bus reset 未实现，只能退而求其次，先 do target reset（**仅 target GG 的可能性是存在的**），如果成功，万事大吉，。如果失败，则明确至少是 bus 异常。
 		*  **开始统一逻辑**，channel 异常，仅有host reset 方法，直接阻塞 Host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线 
 		*/
-		pr_err("%s Implement eh_target_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_target_reset_handler, eh_host_reset_handler\n", __func__);
 		if (starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
 			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
 				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -2036,7 +2038,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*  1. SENTITY_ANY_RUNNING（**明确错误范围仅在 bus**），do bus reset，失败离线即可，成功万事大吉；
 		*  2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host，这种情况下认为 channel 异常，直接执行 host reset，失败离线，成功万事大吉
 		*/
-		pr_err("%s Implement eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
 			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			scsi_eh_queue_checkpoint_work(sdev, HZ);
@@ -2068,7 +2070,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*         2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。&& 此时只能尝试 do bus reset，失败离线即可。
 		*         && 实际上无论返回什么，都仅能够 do bus reset，其实压根没有判断的必要（当然这个取决于代码的写法）
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
 		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) {
 			sdev->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_SDEV;
@@ -2105,7 +2107,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*     2. 其它（**无法明确错误范围仅在 starget**），但是可以无代价阻塞 channel，这种情况下认为 channel 异常，但是 bus reset 未实现，只能退而求其次，先 do bus reset（**仅 channel GG 的可能性是存在的**），如果成功，万事大吉。如果失败，则明确至少是 channel 异常。
 		*     **开始统一逻辑**，channel 异常，仅有 host reset 方法，直接阻塞 host（**可以理解为 Host 的选择或暗示**）。直接reset host，成功完事大吉，失败做对应的离线 
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_host_reset_handler!\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_host_reset_handler!\n", __func__);
 		// eh_host_status_show(sdev);
 		if (starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
 			// pr_err("%s starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT, update to host!\n", __func__);
@@ -2170,7 +2172,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*      1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉; 
 		*      2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
 			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
 				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
@@ -2213,7 +2215,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*      1. SENTITY_ANY_RUNNING（**明确错误范围在 schannel**），do bus reset，失败离线，成功万事大吉；
 		*      2. 其它（**无法明确错误范围仅在 schannel**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
 		*/
-		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
 			scsi_eh_queue_checkpoint_work(sdev, HZ);
@@ -2256,7 +2258,7 @@ void scsi_eh_check_point(struct work_struct *work)
 		*          1. SENTITY_ANY_RUNNING（**明确错误范围在 bus**），do bus reset，失败离线，成功万事大吉；
 		*          2. 其它（**无法明确错误范围仅在 bus**），但是可以无代价阻塞 host。直接 reset host，失败离线，成功万事大吉。
 		*/
-		pr_err("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
+		SCSI_BCEH_LOG("%s Implement eh_device_reset_handler, eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (target_is_healthy(starget) == SENTITY_ANY_RUNNING) { /* 遍历 sdev */
 			sdev->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_SDEV;
@@ -2298,7 +2300,7 @@ void scsi_eh_check_point(struct work_struct *work)
 			}
 		}
 	} else {
-		pr_err("%s Implement nothing!\n", __func__);
+		SCSI_BCEH_LOG("%s Implement nothing!\n", __func__);
 		/* ::: 一旦 sdev 异常，直接离线即可，因为底层没有任何 reset 手段 */
 		scsi_eh_offline_sdev(sdev, false);
 		scsi_eh_finish_work_sequence(shost);
@@ -2310,7 +2312,7 @@ void scsi_eh_check_point(struct work_struct *work)
 static void scsi_eh_drop_pending_fault_locked(struct scsi_device *sdev,
 				const char *reason)
 {
-	pr_err("%s: drop stale pending fault %s, reason=%s, eh_state=%s\n",
+	SCSI_BCEH_LOG("%s: drop stale pending fault %s, reason=%s, eh_state=%s\n",
 		__func__, scsi_eh_locate_sdev(sdev), reason,
 		scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)));
 
@@ -2394,7 +2396,7 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 	kfree(free_seq);
 
 	if (schedule_next) {
-		pr_err("%s: %s restart EH from pending fault\n",
+		SCSI_BCEH_LOG("%s: %s restart EH from pending fault\n",
 			__func__, scsi_eh_locate_sdev(next_sdev));
 		// queue_delayed_work(shost->eh_checkpoint,
 		// 			&next_sdev->checkpoint_work,
@@ -2410,7 +2412,7 @@ static void scsi_eh_enqueue_pending_fault(struct Scsi_Host *shost,
 	struct scsi_eh_work_sequence *seq = shost->eh_work_sequence;
 
 	if (sdev->eh_pending_fault) {
-		pr_err("%s: %s pending fault already queued, seq_phase=%s accepting=%d\n",
+		SCSI_BCEH_LOG("%s: %s pending fault already queued, seq_phase=%s accepting=%d\n",
 			__func__, scsi_eh_locate_sdev(sdev),
 			seq ? scsi_eh_seq_phase_name(seq->phase) : "SEQ_NONE",
 			seq ? seq->accepting_pending : 0);
@@ -2418,7 +2420,7 @@ static void scsi_eh_enqueue_pending_fault(struct Scsi_Host *shost,
 	}
 
 	if (WARN_ON_ONCE(!seq))
-		pr_err("%s: %s enqueue pending fault without active sequence\n",
+		SCSI_BCEH_LOG("%s: %s enqueue pending fault without active sequence\n",
 			__func__, scsi_eh_locate_sdev(sdev));
 
 	scsi_eh_seq_assert_locked(shost, __func__);
@@ -2427,7 +2429,7 @@ static void scsi_eh_enqueue_pending_fault(struct Scsi_Host *shost,
 	sdev->eh_pending_fault = true;
 	sdev->eh_seq = NULL;
 
-	pr_err("%s: %s enqueue pending fault, seq_phase=%s accepting=%d action=%s\n",
+	SCSI_BCEH_LOG("%s: %s enqueue pending fault, seq_phase=%s accepting=%d action=%s\n",
 		__func__, scsi_eh_locate_sdev(sdev),
 		seq ? scsi_eh_seq_phase_name(seq->phase) : "SEQ_NONE",
 		seq ? seq->accepting_pending : 0,
@@ -2465,7 +2467,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 
 	if (sdev->scmd_failed == scsi_device_busy(sdev)) {
 		starget->sdev_failed++;
-		pr_err("%s: %s FAILED TOTALLY!\n", __func__, scsi_eh_locate_sdev(sdev));
+		SCSI_BCEH_LOG("%s: %s FAILED TOTALLY!\n", __func__, scsi_eh_locate_sdev(sdev));
 		/* 
 		 * 每一个 sdev 功德圆满后，都会尝试唤醒 checkpoint 去搞一波，但是后期的实现不是线程了，而是工作队列，所以这里不能无脑噻队列了
 		 * 有 2 种可能性
@@ -2517,7 +2519,7 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 				sdev->is_worker_waiting = true;
 				atomic_set(&sdev->eh_sdev_state, EH_SCHEDULED);
 				schedule_checkpoint = true;
-				pr_err("%s: %s start new EH sequence\n",
+				SCSI_BCEH_LOG("%s: %s start new EH sequence\n",
 					__func__, scsi_eh_locate_sdev(sdev));
 				new_seq = NULL;
 			} else {
@@ -2593,7 +2595,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	BUG_ON(!scmd);
 
-	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
+	SCSI_BCEH_LOG("%s: %s RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
 	rtn = hostt->eh_device_reset_handler(scmd);
 	if (rtn == SUCCESS) {
 		// // pr_err("%s: %s reset success!\n", __func__, scsi_eh_locate_sdev(sdev));
@@ -2653,7 +2655,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 			scsi_eh_recover_scmd(sdev, scmd);
 			scsi_eh_flush_done_q(&sdev->dev_eh_cmd_q);
 			scsi_eh_make_sdev_running(sdev);
-			pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
+			SCSI_BCEH_LOG("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_finish_work_sequence(shost);
 		} else {
 			scsi_eh_recover_scmd(sdev, scmd);
@@ -2667,7 +2669,7 @@ static void scsi_eh_sdev_reset(struct scsi_device *sdev)
 reset_fault:
 		if (sdev->pfaction == OFFLINE_POST_FAULT) {
 			// pr_err("%s: ready to offline %s!\n", __func__, scsi_eh_locate_sdev(sdev));
-			pr_err("%s: %s FINISH EH RESET, OFFLINE SDEV!\n", __func__, scsi_eh_locate_sdev(sdev));
+			SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE SDEV!\n", __func__, scsi_eh_locate_sdev(sdev));
 			scsi_eh_offline_sdev(sdev, false);
 			scsi_eh_finish_work_sequence(shost);
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
@@ -2699,7 +2701,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	BUG_ON(!scmd);
 
-	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_starget(starget));
+	SCSI_BCEH_LOG("%s: %s RESET!\n", __func__, scsi_eh_locate_starget(starget));
 	rtn = hostt->eh_target_reset_handler(scmd);
 	if (rtn == SUCCESS) {
 		scsi_eh_report_starget_reset(starget);
@@ -2820,7 +2822,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
                                         break;
 				case SCSI_EH_TUR_RETRY:
 					if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
-						pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+						SCSI_BCEH_LOG("%s: %s TUR retry failed or exhausted, retries=%u\n",
 							__func__, scsi_eh_locate_sdev(_sdev),
 							_sdev->reset_tur_retry_count);
 						_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
@@ -2897,7 +2899,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 			case SCSI_EH_TUR_RETRY:
 			case SCSI_EH_TUR_PENDING:
 			default:
-				pr_err("%s: %s invalid cached TUR state=%d in target cleanup\n",
+				SCSI_BCEH_LOG("%s: %s invalid cached TUR state=%d in target cleanup\n",
 					__func__, scsi_eh_locate_sdev(_sdev),
 					_sdev->reset_tur_state);
 				scsi_eh_recover_scmd(_sdev, _scmd);
@@ -2907,7 +2909,7 @@ static void scsi_eh_starget_reset(struct scsi_device *sdev, struct scsi_target *
 		}
 
 		scsi_eh_recover_starget(starget); /* 恢复 starget 状态 */
-		pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_starget(starget));
+		SCSI_BCEH_LOG("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_starget(starget));
 		scsi_eh_finish_work_sequence(shost);
 	} else {
 		real_reset_failure = true;
@@ -2922,7 +2924,7 @@ reset_fault:
 					scsi_eh_offline_sdev(_sdev, true);
 				}
 				scsi_eh_recover_starget(starget);
-				pr_err("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
+				SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
 				scsi_eh_finish_work_sequence(shost);
 			} else { /* 如果不是真的失败，idle 的设备保持不变，只离线确实出问题的设备 */
 				list_for_each_entry(_sdev, &starget->devices, same_target_siblings) {
@@ -2946,7 +2948,7 @@ reset_fault:
 					scsi_eh_offline_sdev(_sdev, false);
 				}
 				scsi_eh_recover_starget(starget);
-				pr_err("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
+				SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_starget(starget));
 				scsi_eh_finish_work_sequence(shost);
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
@@ -2981,7 +2983,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	BUG_ON(!scmd);
 
-	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
+	SCSI_BCEH_LOG("%s: %s RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
 	rtn = hostt->eh_bus_reset_handler(scmd);
 	if (rtn == SUCCESS) {
 		scsi_eh_report_schannel_reset(schannel);
@@ -3089,7 +3091,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 						break;
 					case SCSI_EH_TUR_RETRY:
 						if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
-							pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+							SCSI_BCEH_LOG("%s: %s TUR retry failed or exhausted, retries=%u\n",
 								__func__, scsi_eh_locate_sdev(_sdev),
 								_sdev->reset_tur_retry_count);
 							_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
@@ -3162,7 +3164,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 				case SCSI_EH_TUR_RETRY:
 				case SCSI_EH_TUR_PENDING:
 				default:
-					pr_err("%s: %s invalid cached TUR state=%d in channel cleanup\n",
+					SCSI_BCEH_LOG("%s: %s invalid cached TUR state=%d in channel cleanup\n",
 						__func__, scsi_eh_locate_sdev(_sdev),
 						_sdev->reset_tur_state);
 					scsi_eh_recover_scmd(_sdev, _scmd);
@@ -3173,7 +3175,7 @@ static void scsi_eh_schannel_reset(struct scsi_device *sdev,
 			scsi_eh_recover_starget(_starget); /* 恢复 starget 状态 */
 		}
 		scsi_eh_recover_schannel(schannel); /* 恢复 schannel 状态 */
-		pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
+		SCSI_BCEH_LOG("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_schannel(schannel));
 		scsi_eh_finish_work_sequence(shost);
 	} else {
 		real_reset_failure = true;
@@ -3190,7 +3192,7 @@ reset_fault:
 					scsi_eh_recover_starget(_starget);
 				}
 				scsi_eh_recover_schannel(schannel); /* 恢复 channel 数据结构的状态 */
-				pr_err("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
+				SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
 				scsi_eh_finish_work_sequence(shost);
 			} else { /* 如果不是真的失败，idle 的设备保持不变，只离线确实出问题的设备，eh 的错误状态也需要全部恢复 */
 				list_for_each_entry(_starget, &schannel->targets, same_channel_siblings) {
@@ -3217,7 +3219,7 @@ reset_fault:
 					scsi_eh_recover_starget(_starget);
 				}
 				scsi_eh_recover_schannel(schannel);
-				pr_err("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
+				SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_schannel(schannel));
 				scsi_eh_finish_work_sequence(shost);
 			}
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
@@ -3253,7 +3255,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 	scmd = list_first_entry(&sdev->dev_eh_cmd_q, struct scsi_cmnd, eh_entry);
 	BUG_ON(!scmd);
 
-	pr_err("%s: %s RESET!\n", __func__, scsi_eh_locate_shost(shost));
+	SCSI_BCEH_LOG("%s: %s RESET!\n", __func__, scsi_eh_locate_shost(shost));
 	rtn = hostt->eh_host_reset_handler(scmd);
 	if (rtn == SUCCESS) {
 		scsi_eh_report_shost_reset(shost);
@@ -3364,7 +3366,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 							break;
 						case SCSI_EH_TUR_RETRY:
 							if (!scsi_eh_retry_tur_to_sdev(_sdev, _scmd)) {
-								pr_err("%s: %s TUR retry failed or exhausted, retries=%u\n",
+								SCSI_BCEH_LOG("%s: %s TUR retry failed or exhausted, retries=%u\n",
 									__func__, scsi_eh_locate_sdev(_sdev),
 									_sdev->reset_tur_retry_count);
 								_sdev->reset_tur_state = SCSI_EH_TUR_FAILED;
@@ -3441,7 +3443,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 					case SCSI_EH_TUR_RETRY:
 					case SCSI_EH_TUR_PENDING:
 					default:
-						pr_err("%s: %s invalid cached TUR state=%d in host cleanup\n",
+						SCSI_BCEH_LOG("%s: %s invalid cached TUR state=%d in host cleanup\n",
 							__func__, scsi_eh_locate_sdev(_sdev),
 							_sdev->reset_tur_state);
 						scsi_eh_recover_scmd(_sdev, _scmd);
@@ -3457,7 +3459,7 @@ static void scsi_eh_shost_reset(struct scsi_device *sdev,
 		}
 
 		scsi_eh_recover_shost(shost); /* 恢复 shost 状态 */
-		pr_err("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_shost(shost));
+		SCSI_BCEH_LOG("%s: %s FINISH EH RESET!\n", __func__, scsi_eh_locate_shost(shost));
 	} else { /* host reset 失败 */
 		real_reset_failure = true;
 		// pr_err("%s: %s reset fault!\n", __func__, scsi_eh_locate_shost(shost));
@@ -3475,7 +3477,7 @@ reset_fault:
 				scsi_eh_recover_schannel(_schannel);
 			}
 			scsi_eh_recover_shost(shost);
-			pr_err("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_shost(shost));
+			SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE ALL SDEVS!\n", __func__, scsi_eh_locate_shost(shost));
 		} else {
 			scsi_eh_recover_shost_state(shost);
 			list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
@@ -3503,14 +3505,14 @@ reset_fault:
 				scsi_eh_recover_schannel(_schannel);
 			}
 			scsi_eh_recover_shost(shost);
-			pr_err("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_shost(shost));
+			SCSI_BCEH_LOG("%s: %s FINISH EH RESET, OFFLINE NO IDLE SDEVS!\n", __func__, scsi_eh_locate_shost(shost));
 		}
 	}
 
 	eh_scsi_restart_operations(shost);
 	scsi_eh_finish_work_sequence(shost);
 
-	pr_err("%s END\n", __func__);
+	SCSI_BCEH_LOG("%s END\n", __func__);
 
 	return;
 }
@@ -3570,7 +3572,7 @@ void scsi_eh_debug_worker(struct work_struct *work)
 	list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 		list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {
 			list_for_each_entry(_sdev, &_starget->devices, same_target_siblings) {
-				pr_err("%s: %s busy=%d,state=%s,eh_state=%s,iorequest_cnt=%d,iodone_cnt=%d,ioerr_cnt=%d,iotmo_cnt=%d\n",
+				SCSI_BCEH_LOG("%s: %s busy=%d,state=%s,eh_state=%s,iorequest_cnt=%d,iodone_cnt=%d,ioerr_cnt=%d,iotmo_cnt=%d\n",
 					 __func__, scsi_eh_locate_sdev(_sdev), scsi_device_busy(_sdev),
 					 scsi_device_show_state(_sdev->sdev_state), scsi_eh_state_name(atomic_read(&sdev->eh_sdev_state)),
 					 atomic_read(&_sdev->iorequest_cnt), atomic_read(&_sdev->iodone_cnt), atomic_read(&_sdev->ioerr_cnt),
@@ -4695,17 +4697,17 @@ static int scsi_eh_tur(struct scsi_cmnd *scmd)
 	int retry_cnt = 1;
 	enum scsi_disposition rtn;
 
-	pr_err("%s TUR START!\n", __func__);
+	SCSI_BCEH_LOG("%s TUR START!\n", __func__);
 
 retry_tur:
 	rtn = scsi_send_eh_cmnd(scmd, tur_command, 6,
 				scmd->device->eh_timeout, 0);
 	if (rtn == SUCCESS)
-		pr_err("%s TUR SUCCESS rtn=0x%x\n", __func__, rtn);
+		SCSI_BCEH_LOG("%s TUR SUCCESS rtn=0x%x\n", __func__, rtn);
 
 	SCSI_LOG_ERROR_RECOVERY(3, scmd_printk(KERN_INFO, scmd,
 		"%s return: %x\n", __func__, rtn));
-	scmd_printk(KERN_INFO, scmd, "%s return: %x\n", __func__, rtn);
+	SCSI_BCEH_SCMD_LOG(scmd, "%s return: %x\n", __func__, rtn);
 
 	switch (rtn) {
 	case NEEDS_RETRY:
@@ -4912,11 +4914,10 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 		SCSI_LOG_ERROR_RECOVERY(3,
 			sdev_printk(KERN_INFO, sdev,
 				     "%s: Sending BDR\n", current->comm));
-		sdev_printk(KERN_INFO, sdev,
-				"%s: Sending BDR\n", current->comm);
+		SCSI_BCEH_SDEV_LOG(sdev, "%s: Sending BDR\n", current->comm);
 		rtn = scsi_try_bus_device_reset(bdr_scmd);
 		if (rtn == SUCCESS || rtn == FAST_IO_FAIL) {
-			sdev_printk(KERN_INFO, sdev, "%s: BDR SUCCESS or FAST_IO_FAIL, rtn=0x%x\n",
+			SCSI_BCEH_SDEV_LOG(sdev, "%s: BDR SUCCESS or FAST_IO_FAIL, rtn=0x%x\n",
 				 current->comm, rtn);
 			if (!scsi_device_online(sdev) ||
 			    rtn == FAST_IO_FAIL ||
@@ -4933,7 +4934,7 @@ static int scsi_eh_bus_device_reset(struct Scsi_Host *shost,
 			SCSI_LOG_ERROR_RECOVERY(3,
 				sdev_printk(KERN_INFO, sdev,
 					    "%s: BDR failed\n", current->comm));
-			sdev_printk(KERN_INFO, sdev,
+			SCSI_BCEH_SDEV_LOG(sdev,
 					"%s: BDR failed\n", current->comm);
 		}
 	}
@@ -4972,7 +4973,7 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					    "%s: Skip target reset, past eh deadline\n",
 					     current->comm));
-			shost_printk(KERN_INFO, shost,
+			SCSI_BCEH_SHOST_LOG(shost,
 					"%s: Skip target reset, past eh deadline\n",
 					current->comm);
 			return list_empty(work_q);
@@ -4985,7 +4986,7 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending target reset to target %d\n",
 				     current->comm, id));
-		shost_printk(KERN_INFO, shost,
+		SCSI_BCEH_SHOST_LOG(shost,
 				"%s: Sending target reset to target %d\n",
 				current->comm, id);
 		rtn = scsi_try_target_reset(scmd);
@@ -4995,7 +4996,7 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 					     "%s: Target reset failed"
 					     " target: %d\n",
 					     current->comm, id));
-			shost_printk(KERN_INFO, shost,
+			SCSI_BCEH_SHOST_LOG(shost,
 					"%s: Target reset failed"
 					" target: %d\n",
 					current->comm, id);
@@ -5045,7 +5046,7 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					    "%s: skip BRST, past eh deadline\n",
 					     current->comm));
-			shost_printk(KERN_INFO, shost,
+			SCSI_BCEH_SHOST_LOG(shost,
 					"%s: skip BRST, past eh deadline\n",
 					current->comm);
 			return list_empty(work_q);
@@ -5069,7 +5070,7 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending BRST chan: %d\n",
 				     current->comm, channel));
-		shost_printk(KERN_INFO, shost,
+		SCSI_BCEH_SHOST_LOG(shost,
 				"%s: Sending BRST chan: %d\n",
 				current->comm, channel);
 		rtn = scsi_try_bus_reset(chan_scmd);
@@ -5089,7 +5090,7 @@ static int scsi_eh_bus_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					     "%s: BRST failed chan: %d\n",
 					     current->comm, channel));
-			shost_printk(KERN_INFO, shost,
+			SCSI_BCEH_SHOST_LOG(shost,
 					"%s: BRST failed chan: %d\n",
 					current->comm, channel);
 		}
@@ -5119,7 +5120,7 @@ static int scsi_eh_host_reset(struct Scsi_Host *shost,
 			shost_printk(KERN_INFO, shost,
 				     "%s: Sending HRST\n",
 				     current->comm));
-		shost_printk(KERN_INFO, shost,
+		SCSI_BCEH_SHOST_LOG(shost,
 				"%s: Sending HRST\n",
 				current->comm);
 
@@ -5135,7 +5136,7 @@ static int scsi_eh_host_reset(struct Scsi_Host *shost,
 				shost_printk(KERN_INFO, shost,
 					     "%s: HRST failed\n",
 					     current->comm));
-			shost_printk(KERN_INFO, shost,
+			SCSI_BCEH_SHOST_LOG(shost,
 					"%s: HRST failed\n",
 					current->comm);
 		}
@@ -5155,7 +5156,7 @@ static void scsi_eh_offline_sdevs(struct list_head *work_q,
 	struct scsi_device *sdev;
 
 	list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
-		sdev_printk(KERN_INFO, scmd->device, "Device offlined - "
+		SCSI_BCEH_SCMD_LOG(scmd->device, "Device offlined - "
 			    "not ready after error recovery\n");
 		sdev = scmd->device;
 
@@ -5612,7 +5613,7 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 	list_splice_init(&shost->eh_cmd_q, &eh_work_q);
 	spin_unlock_irqrestore(shost->host_lock, flags);
 
-	pr_err("%s START!\n", __func__);
+	pr_err("%s START! jiffies=%lu ms=%u\n", __func__, jiffies, jiffies_to_msecs(jiffies));
 
 	SCSI_LOG_ERROR_RECOVERY(1, scsi_eh_prt_fail_stats(shost, &eh_work_q));
 
@@ -5624,7 +5625,7 @@ static void scsi_unjam_host(struct Scsi_Host *shost)
 		shost->last_reset = 0;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 	scsi_eh_flush_done_q(&eh_done_q);
-	pr_err("%s END!\n", __func__);
+	pr_err("%s END! jiffies=%lu ms=%u\n", __func__, jiffies, jiffies_to_msecs(jiffies));
 }
 
 /**

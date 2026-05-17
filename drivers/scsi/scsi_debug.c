@@ -7285,7 +7285,7 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 	u8 *cmd = SCpnt->cmnd;
 	u8 opcode = cmd[0];
 
-	pr_err("%s START!\n", __func__);
+	SCSI_BCEH_LOG("%s START!\n", __func__);
 
 	++num_dev_resets;
 
@@ -7301,14 +7301,14 @@ static int scsi_debug_device_reset(struct scsi_cmnd *SCpnt)
 
 	if (sdebug_fail_lun_reset(SCpnt)) {
 		scmd_printk(KERN_INFO, SCpnt, "fail lun reset 0x%x\n", opcode);
-		pr_err("%s end FAILED!\n", __func__);
+		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
 	}
 
 	sdebug_clear_tmout_abort_injects(sdp);
 	sdebug_arm_post_reset_validation(devip, SDEB_RST_DEV);
 
-	pr_err("%s end SUCCESS!\n", __func__);
+	SCSI_BCEH_LOG("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
 }
@@ -7355,7 +7355,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	u8 opcode = cmd[0];
 	int k = 0;
 
-	pr_err("%s START!\n", __func__);
+	SCSI_BCEH_LOG("%s START!\n", __func__);
 
 	++num_target_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
@@ -7377,7 +7377,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 	if (sdebug_fail_target_reset(SCpnt)) {
 		scmd_printk(KERN_INFO, SCpnt, "fail target reset 0x%x\n",
 			    opcode);
-		pr_err("%s end FAILED!\n", __func__);
+		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
 	}
 
@@ -7387,7 +7387,7 @@ static int scsi_debug_target_reset(struct scsi_cmnd *SCpnt)
 			sdebug_arm_post_reset_validation(devip, SDEB_RST_TGT);
 	}
 
-	pr_err("%s end SUCCESS!\n", __func__);
+	SCSI_BCEH_LOG("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
 }
@@ -7449,7 +7449,7 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 	struct sdebug_dev_info *devip;
 	int k = 0;
 
-	pr_err("%s START!\n", __func__);
+	SCSI_BCEH_LOG("%s START!\n", __func__);
 
 	++num_bus_resets;
 
@@ -7471,7 +7471,7 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 
 	if (sdebug_fail_bus_reset(SCpnt)) {
 			scmd_printk(KERN_INFO, SCpnt, "fail bus reset 0x%x\n", SCpnt->cmnd[0]);
-			pr_err("%s end FAILED!\n", __func__);
+			SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 			return FAILED;
 	}
 
@@ -7480,7 +7480,7 @@ static int scsi_debug_bus_reset(struct scsi_cmnd *SCpnt)
 		if (devip->channel == sdp->channel)
 			sdebug_arm_post_reset_validation(devip, SDEB_RST_BUS);
 	}
-	pr_err("%s end SUCCESS!\n", __func__);
+	SCSI_BCEH_LOG("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
 }
@@ -7494,7 +7494,7 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
         bool host_fail;
         int k = 0;
 
-	pr_err("%s START!\n", __func__);
+	SCSI_BCEH_LOG("%s START!\n", __func__);
 
 	++num_host_resets;
 	if (SDEBUG_OPT_ALL_NOISE & sdebug_opts)
@@ -7538,14 +7538,14 @@ static int scsi_debug_host_reset(struct scsi_cmnd *SCpnt)
 	stop_all_queued();
 	if (host_fail) {
 		scmd_printk(KERN_INFO, SCpnt, "fail host reset 0x%x\n", SCpnt->cmnd[0]);
-		pr_err("%s end FAILED!\n", __func__);
+		SCSI_BCEH_LOG("%s end FAILED!\n", __func__);
 		return FAILED;
 	}
 	if (SDEBUG_OPT_RESET_NOISE & sdebug_opts)
 		sdev_printk(KERN_INFO, SCpnt->device,
 			    "%s: %d device(s) found\n", __func__, k);
 
-	pr_err("%s end SUCCESS!\n", __func__);
+	SCSI_BCEH_LOG("%s end SUCCESS!\n", __func__);
 
 	return SUCCESS;
 }
@@ -9823,7 +9823,7 @@ static int scsi_debug_queuecommand(struct Scsi_Host *shost,
 
 		if (sdebug_consume_post_reset_validation(scp, &vst, &vact)) {
 			if (vact == SDEB_VAL_TIMEOUT) {
-				scmd_printk(KERN_INFO, scp,
+				SCSI_BCEH_SCMD_LOG(scp,
 						"post-%s TUR timeout\n",
 						sdebug_reset_stage_name(vst));
 				return 0; /* 不完成，等 EH TUR 自己超时 */
@@ -9832,7 +9832,7 @@ static int scsi_debug_queuecommand(struct Scsi_Host *shost,
 			if (vact == SDEB_VAL_FAIL) {
 				int vret;
 
-				scmd_printk(KERN_INFO, scp,
+				SCSI_BCEH_SCMD_LOG(scp,
 						"post-%s TUR fail\n",
 						sdebug_reset_stage_name(vst));
 

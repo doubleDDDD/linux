@@ -226,6 +226,15 @@ config SCSI_LOGGING
 	  there should be no noticeable performance impact as long as you have
 	  logging turned off.
 
+config SCSI_BC_EH_LOG
+	bool "BC-EH experiment verbose logging"
+	depends on SCSI
+	default n
+	help
+	  Compile-time switch for BC-EH experimental verbose logging.
+	  If disabled, BC-EH path logs are compiled out to minimize
+	  timing interference during performance experiments.
+
 config SCSI_SCAN_ASYNC
 	bool "Asynchronous SCSI scanning"
 	depends on SCSI
