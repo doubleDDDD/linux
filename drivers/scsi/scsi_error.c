@@ -443,10 +443,110 @@ static inline const char *scsi_eh_seq_phase_name(enum scsi_eh_seq_phase phase)
 	}
 }
 
+static bool scsi_eh_host_in_teardown(const struct Scsi_Host *shost)
+{
+	switch (READ_ONCE(shost->shost_state)) {
+	case SHOST_CANCEL:
+	case SHOST_CANCEL_RECOVERY:
+	case SHOST_DEL:
+	case SHOST_DEL_RECOVERY:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool scsi_eh_sdev_in_teardown(const struct scsi_device *sdev)
+{
+	switch (READ_ONCE(sdev->sdev_state)) {
+	case SDEV_CANCEL:
+	case SDEV_DEL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool scsi_eh_in_teardown(const struct scsi_device *sdev)
+{
+	return scsi_eh_sdev_in_teardown(sdev) ||
+		scsi_eh_host_in_teardown(sdev->host);
+}
+
+static bool scsi_eh_queue_checkpoint_work(struct scsi_device *sdev,
+					unsigned long delay)
+{
+	if (unlikely(scsi_eh_in_teardown(sdev)))
+		return false;
+
+	return queue_delayed_work(sdev->host->eh_checkpoint,
+					&sdev->checkpoint_work, delay);
+}
+
+static bool scsi_eh_queue_reset_delayed(struct scsi_device *sdev,
+				unsigned long delay)
+{
+	if (unlikely(scsi_eh_in_teardown(sdev)))
+		return false;
+
+	return queue_delayed_work(sdev->host->eh_process,
+					&sdev->eh_reset_work, delay);
+}
+
 static inline bool scsi_eh_seq_phase_accepts_pending(enum scsi_eh_seq_phase phase)
 {
 	return phase == SCSI_EH_SEQ_PHASE_INIT ||
 		phase == SCSI_EH_SEQ_PHASE_CHECKPOINT;
+}
+
+enum scsi_eh_tur_state {
+	SCSI_EH_TUR_PENDING = 0,
+	SCSI_EH_TUR_SUCCESS,
+	SCSI_EH_TUR_RETRY,
+	SCSI_EH_TUR_FAILED,
+};
+
+void scsi_eh_cancel_sdev(struct scsi_device *sdev)
+{
+	struct Scsi_Host *shost = sdev->host;
+	unsigned long flags;
+	bool finish_seq = false;
+
+	cancel_delayed_work_sync(&sdev->checkpoint_work);
+	cancel_delayed_work_sync(&sdev->eh_reset_work);
+	cancel_delayed_work_sync(&sdev->eh_debug_work);
+
+	spin_lock_irqsave(shost->host_lock, flags);
+
+	if (sdev->eh_pending_fault) {
+		list_del_init(&sdev->eh_pending_fault_node);
+		sdev->eh_pending_fault = false;
+	}
+
+	if (sdev->eh_queued) {
+		list_del_init(&sdev->sdev_eh_siblings);
+		sdev->eh_queued = false;
+	}
+
+	if (shost->eh_work_sequence &&
+		shost->eh_work_sequence->anchor_sdev == sdev)
+		finish_seq = true;
+
+	sdev->eh_seq = NULL;
+	sdev->is_worker_waiting = false;
+	atomic_set(&sdev->eh_sdev_state, EH_NORMAL);
+	sdev->pfaction = OFFLINE_POST_FAULT;
+	sdev->eh_reset_level = EH_SDEV;
+	sdev->scmd_failed = 0;
+	sdev->idle = false;
+	sdev->reset_tur_wait_timeout_done = false;
+	sdev->reset_tur_retry_count = 0;
+	sdev->reset_tur_state = SCSI_EH_TUR_PENDING;
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	if (finish_seq)
+		scsi_eh_finish_work_sequence(shost);
 }
 
 static char sdev_locate[64] = {0};
@@ -1356,13 +1456,6 @@ static enum eh_update_result update_eh_field_to_host(struct Scsi_Host *shost)
 		return DONE;
 }
 
-enum scsi_eh_tur_state {
-	SCSI_EH_TUR_PENDING = 0,
-	SCSI_EH_TUR_SUCCESS,
-	SCSI_EH_TUR_RETRY,
-	SCSI_EH_TUR_FAILED,
-};
-
 static void scsi_eh_recover_scmd(struct scsi_device *sdev, struct scsi_cmnd *scmd)
 {
 	// TODO 判空
@@ -1387,7 +1480,7 @@ static void scsi_eh_recover_sdev(struct scsi_device *sdev)
 	sdev->scmd_failed = 0;
 	if (sdev->eh_queued) {
 		sdev->eh_queued = false;
-		list_del(&sdev->sdev_eh_siblings);
+		list_del_init(&sdev->sdev_eh_siblings);
 	}
 	// pr_err("%s: %s recover eh state!\n", __func__, scsi_eh_locate_sdev(sdev));
         sdev->reset_tur_wait_timeout_done = false;
@@ -1402,7 +1495,7 @@ static void scsi_eh_recover_starget(struct scsi_target *starget)
 	starget->sdev_failed = 0;
 	if (starget->eh_queued) {
 		starget->eh_queued = false;
-		list_del(&starget->starget_eh_siblings);
+		list_del_init(&starget->starget_eh_siblings);
 	}
 	// pr_err("%s: %s recover eh state!\n", __func__, scsi_eh_locate_starget(starget));
 }
@@ -1414,7 +1507,7 @@ static void scsi_eh_recover_schannel(struct scsi_channel *schannel)
 	schannel->starget_failed = 0;
 	if (schannel->eh_queued) {
 		schannel->eh_queued = false;
-		list_del(&schannel->schannel_eh_siblings);
+		list_del_init(&schannel->schannel_eh_siblings);
 	}
 	// pr_err("%s: %s recover eh state!\n", __func__, scsi_eh_locate_schannel(schannel));
 }
@@ -1700,6 +1793,9 @@ static void scsi_eh_seq_set_phase(struct scsi_device *sdev,
 
 static void scsi_eh_queue_reset_work(struct scsi_device *sdev)
 {
+        if (unlikely(scsi_eh_in_teardown(sdev)))
+                return;
+
         if (scsi_eh_absorb_pending_faults_for_reset_scope(sdev))
                 pr_err("%s: %s absorb scope-matched pending faults before reset, level=%s\n",
                         __func__, scsi_eh_locate_sdev(sdev),
@@ -1717,6 +1813,9 @@ void scsi_eh_check_point(struct work_struct *work)
 	struct scsi_target *starget = sdev->sdev_target;
 	struct scsi_channel *schannel = sdev->schannel;
 	const struct scsi_host_template *hostt = shost->hostt;
+
+	if (unlikely(scsi_eh_in_teardown(sdev)))
+		return;
 
 	pr_err("%s check_point wakeup!\n", __func__);
 	scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
@@ -1748,7 +1847,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 			// pr_err("%s update_eh_field_to_target need wait I/O done\n", __func__);
 			// eh_host_status_show(sdev);
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			// pr_err("%s update_eh_field_to_target no need wait I/O done\n", __func__);
 			// eh_host_status_show(sdev);
@@ -1767,7 +1867,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		// 讨论 host 是否健康没有意义，只能执行 schannel reset，成功万事大吉，失败直接离线
 		pr_err("%s Implement eh_bus_reset_handler\n", __func__);
 		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			schannel->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_SCHANNEL;
@@ -1778,7 +1879,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		/* ::: 只要有异常 sdev，直接阻塞整个 Host（**这个是host的选择没有办法**），异常 host 功德圆满 GG 后，直接执行 host reset，无需考虑任何返回值等 */
 		pr_err("%s Implement eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			shost->pfaction = OFFLINE_POST_FAULT;
 			sdev->eh_reset_level = EH_SHOST;
@@ -1801,7 +1903,8 @@ void scsi_eh_check_point(struct work_struct *work)
 			scsi_eh_queue_reset_work(sdev);
 		} else {
 			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				starget->pfaction = OFFLINE_POST_FAULT;
 				sdev->eh_reset_level = EH_STARGET;
@@ -1821,7 +1924,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
 			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				schannel->pfaction = OFFLINE_POST_FAULT;
 				sdev->eh_reset_level = EH_SCHANNEL;
@@ -1850,7 +1954,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_device_reset_handler, eh_host_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
 			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				shost->pfaction = OFFLINE_POST_FAULT;
 				sdev->eh_reset_level = EH_SHOST;
@@ -1881,7 +1986,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		*/
 		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
 				starget->pfaction = OFFLINE_POST_FAULT;
@@ -1890,7 +1996,8 @@ void scsi_eh_check_point(struct work_struct *work)
 				scsi_eh_queue_reset_work(sdev);
 			} else {
 				if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					scsi_eh_queue_checkpoint_work(sdev, HZ);
 				} else {
 					schannel->pfaction = OFFLINE_POST_FAULT;
 					sdev->eh_reset_level = EH_SCHANNEL;
@@ -1908,7 +2015,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_target_reset_handler, eh_host_reset_handler\n", __func__);
 		if (starget->pfaction == UPGRADE_TO_HOST_RESET_POST_FAULT) {
 			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				shost->pfaction = OFFLINE_POST_FAULT;
 				sdev->eh_reset_level = EH_SHOST;
@@ -1917,7 +2025,8 @@ void scsi_eh_check_point(struct work_struct *work)
 			}
 		} else {
 			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
 					starget->pfaction = OFFLINE_POST_FAULT;
@@ -1939,7 +2048,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		*/
 		pr_err("%s Implement eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
 				schannel->pfaction = OFFLINE_POST_FAULT;
@@ -1948,7 +2058,8 @@ void scsi_eh_check_point(struct work_struct *work)
 				scsi_eh_queue_reset_work(sdev);
 			} else {
 				if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					scsi_eh_queue_checkpoint_work(sdev, HZ);
 				} else {
 					shost->pfaction = OFFLINE_POST_FAULT;
 					sdev->eh_reset_level = EH_SHOST;
@@ -1975,7 +2086,8 @@ void scsi_eh_check_point(struct work_struct *work)
 			scsi_eh_queue_reset_work(sdev);
 		} else {
 			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
 					starget->pfaction = OFFLINE_POST_FAULT;
@@ -1984,7 +2096,8 @@ void scsi_eh_check_point(struct work_struct *work)
 					scsi_eh_queue_reset_work(sdev);
 				} else {
 					if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						scsi_eh_queue_checkpoint_work(sdev, HZ);
 					} else {
 						schannel->pfaction = OFFLINE_POST_FAULT;
 						sdev->eh_reset_level = EH_SCHANNEL;
@@ -2010,7 +2123,8 @@ void scsi_eh_check_point(struct work_struct *work)
 			if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
 				// pr_err("%s need wait update to host done!\n", __func__);
 				// eh_host_status_show(sdev);
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				// pr_err("%s no need wait update to host done!\n", __func__);
 				// eh_host_status_show(sdev);
@@ -2035,7 +2149,8 @@ void scsi_eh_check_point(struct work_struct *work)
 				if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
 					// pr_err("%s need wait update to target done!\n", __func__);
 					// eh_host_status_show(sdev);
-					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					scsi_eh_queue_checkpoint_work(sdev, HZ);
 				} else {
 					// pr_err("%s no need wait update to target done!\n", __func__);
 					// eh_host_status_show(sdev);
@@ -2068,7 +2183,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		pr_err("%s Implement eh_device_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (sdev->pfaction == UPGRADE_TO_BUS_RESET_POST_FAULT) {
 			if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
 					schannel->pfaction = OFFLINE_POST_FAULT;
@@ -2077,7 +2193,8 @@ void scsi_eh_check_point(struct work_struct *work)
 					scsi_eh_queue_reset_work(sdev);
 				} else {
 					if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						scsi_eh_queue_checkpoint_work(sdev, HZ);
 					} else {
 						shost->pfaction = OFFLINE_POST_FAULT;
 						sdev->eh_reset_level = EH_SHOST;
@@ -2108,7 +2225,8 @@ void scsi_eh_check_point(struct work_struct *work)
 		*/
 		pr_err("%s Implement eh_target_reset_handler, eh_bus_reset_handler, eh_host_reset_handler\n", __func__);
 		if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) {
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		} else {
 			if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
 				starget->pfaction = OFFLINE_POST_FAULT;
@@ -2117,7 +2235,8 @@ void scsi_eh_check_point(struct work_struct *work)
 				scsi_eh_queue_reset_work(sdev);
 			} else {
 				if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-					queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+					scsi_eh_queue_checkpoint_work(sdev, HZ);
 				} else {
 					if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
 						schannel->pfaction = OFFLINE_POST_FAULT;
@@ -2126,7 +2245,8 @@ void scsi_eh_check_point(struct work_struct *work)
 						scsi_eh_queue_reset_work(sdev);
 					} else {
 						if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-							queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+							// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+							scsi_eh_queue_checkpoint_work(sdev, HZ);
 						} else {
 							shost->pfaction = OFFLINE_POST_FAULT;
 							sdev->eh_reset_level = EH_SHOST;
@@ -2154,7 +2274,8 @@ void scsi_eh_check_point(struct work_struct *work)
 			scsi_eh_queue_reset_work(sdev);
 		} else {
 			if (update_eh_field_to_target(starget) == NEED_WAIT_IO_DONE) { /* 可能有的 sdev GG 还在路上（比如说全部都超时了，但是仅过了10s），也可以提前终结掉；但是 IDLE 的一定全部都 stop 掉了 */
-				queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+				scsi_eh_queue_checkpoint_work(sdev, HZ);
 			} else {
 				if (channel_is_healthy(schannel) == SENTITY_ANY_RUNNING) {
 					starget->pfaction = OFFLINE_POST_FAULT;
@@ -2163,7 +2284,8 @@ void scsi_eh_check_point(struct work_struct *work)
 					scsi_eh_queue_reset_work(sdev);
 				} else {
 					if (update_eh_field_to_channel(schannel) == NEED_WAIT_IO_DONE) {
-						queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+						scsi_eh_queue_checkpoint_work(sdev, HZ);
 					} else {
 						if (shost_is_healthy(shost) == SENTITY_ANY_RUNNING) {
 							schannel->pfaction = OFFLINE_POST_FAULT;
@@ -2172,13 +2294,14 @@ void scsi_eh_check_point(struct work_struct *work)
 							scsi_eh_queue_reset_work(sdev);
 						} else {
 							if (update_eh_field_to_host(shost) == NEED_WAIT_IO_DONE) {
-								queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
-						} else {
-							shost->pfaction = OFFLINE_POST_FAULT;
-							sdev->eh_reset_level = EH_SHOST;
-							// queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
-							scsi_eh_queue_reset_work(sdev);
-						}
+								// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+								scsi_eh_queue_checkpoint_work(sdev, HZ);
+							} else {
+								shost->pfaction = OFFLINE_POST_FAULT;
+								sdev->eh_reset_level = EH_SHOST;
+								// queue_delayed_work(shost->eh_process, &sdev->eh_reset_work, HZ / 100);
+								scsi_eh_queue_reset_work(sdev);
+							}
 						}
 					}
 				}
@@ -2283,9 +2406,10 @@ static void scsi_eh_finish_work_sequence(struct Scsi_Host *shost)
 	if (schedule_next) {
 		pr_err("%s: %s restart EH from pending fault\n",
 			__func__, scsi_eh_locate_sdev(next_sdev));
-		queue_delayed_work(shost->eh_checkpoint,
-					&next_sdev->checkpoint_work,
-					HZ / 100);
+		// queue_delayed_work(shost->eh_checkpoint,
+		// 			&next_sdev->checkpoint_work,
+		// 			HZ / 100);
+		scsi_eh_queue_checkpoint_work(next_sdev, HZ / 100);
 	}
 }
 
@@ -2413,10 +2537,12 @@ void scsi_eh_scmd_add_to_sdev(struct scsi_cmnd *scmd)
 			spin_unlock_irqrestore(shost->host_lock, flags);
 
 			kfree(new_seq);
-			if (schedule_checkpoint)
-				queue_delayed_work(shost->eh_checkpoint,
-							&sdev->checkpoint_work,
-							HZ / 100);
+			if (schedule_checkpoint) {
+				// queue_delayed_work(shost->eh_checkpoint,
+				// 			&sdev->checkpoint_work,
+				// 			HZ / 100);
+				scsi_eh_queue_checkpoint_work(sdev, HZ / 100);
+			}
 		}
 	}
 }
@@ -2557,7 +2683,8 @@ reset_fault:
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&sdev->eh_sdev_state, EH_RUNNING);
 			scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		}
 	}
 
@@ -2835,7 +2962,8 @@ reset_fault:
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&starget->eh_starget_state, EH_RUNNING);
 			scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		}
 	}
 
@@ -3105,7 +3233,8 @@ reset_fault:
 		} else { /* UPGRADE_TO_TARGET_RESET_POST_FAULT, UPGRADE_TO_BUS_RESET_POST_FAULT, UPGRADE_TO_HOST_RESET_POST_FAULT */
 			atomic_set(&schannel->eh_schannel_state, EH_RUNNING);
 			scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
-			queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			// queue_delayed_work(shost->eh_checkpoint, &sdev->checkpoint_work, HZ);
+			scsi_eh_queue_checkpoint_work(sdev, HZ);
 		}
 	}
 
@@ -3406,6 +3535,8 @@ void scsi_eh_reset_worker(struct work_struct *work)
 	// pr_err("%s eh begin reset, reset level=%s\n",
 	// 	__func__, scsi_eh_reset_level_name(sdev->eh_reset_level));
 	// eh_host_status_show(sdev);
+	if (unlikely(scsi_eh_in_teardown(sdev)))
+		return;
 
 	switch(sdev->eh_reset_level){
 	case EH_SDEV:
@@ -3442,6 +3573,9 @@ void scsi_eh_debug_worker(struct work_struct *work)
 	struct scsi_channel *_schannel;
 	struct scsi_target *_starget;
 	struct scsi_device *_sdev;
+
+	if (unlikely(scsi_eh_in_teardown(sdev)))
+		return;
 
 	list_for_each_entry(_schannel, &shost->schannels, same_host_siblings) {
 		list_for_each_entry(_starget, &_schannel->targets, same_channel_siblings) {

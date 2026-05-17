@@ -79,6 +79,7 @@ extern int scsi_dev_info_list_add_keyed(int compatible, char *vendor,
 					char *model, char *strflags,
 					blist_flags_t flags,
 					enum scsi_devinfo_key key);
+extern void scsi_eh_cancel_sdev(struct scsi_device *sdev);
 extern int scsi_dev_info_add_list(enum scsi_devinfo_key key, const char *name);
 extern int scsi_dev_info_remove_list(enum scsi_devinfo_key key);
 
