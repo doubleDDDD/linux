@@ -483,16 +483,6 @@ static bool scsi_eh_queue_checkpoint_work(struct scsi_device *sdev,
 					&sdev->checkpoint_work, delay);
 }
 
-static bool scsi_eh_queue_reset_delayed(struct scsi_device *sdev,
-				unsigned long delay)
-{
-	if (unlikely(scsi_eh_in_teardown(sdev)))
-		return false;
-
-	return queue_delayed_work(sdev->host->eh_process,
-					&sdev->eh_reset_work, delay);
-}
-
 static inline bool scsi_eh_seq_phase_accepts_pending(enum scsi_eh_seq_phase phase)
 {
 	return phase == SCSI_EH_SEQ_PHASE_INIT ||
