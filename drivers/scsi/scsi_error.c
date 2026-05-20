@@ -1809,7 +1809,7 @@ void scsi_eh_check_point(struct work_struct *work)
 	if (unlikely(scsi_eh_in_teardown(sdev)))
 		return;
 
-	SCSI_BCEH_LOG("%s check_point wakeup!\n", __func__);
+	pr_err("%s check_point wakeup, start_ns=%llu!\n", __func__, ktime_get_ns());
 	scsi_eh_seq_set_phase(sdev, SCSI_EH_SEQ_PHASE_CHECKPOINT);
 	// queue_delayed_work(shost->eh_debug, &sdev->eh_debug_work, 3 * HZ);
 	/* 底层驱动实现 handler 的可能性不同，这里需要评估策略，最简单的就是一个大case，根据底层不同的实现先分开 */
