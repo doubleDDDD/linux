@@ -117,8 +117,7 @@ static bool bc_iscsi_should_fake_dev_reset(struct scsi_cmnd *sc)
 		return true;
 
 	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
-		bc_iscsi_fault_active &&
-		bc_iscsi_is_fault_lun(sc))
+		bc_iscsi_fault_active)
 		return true;
 
 	return false;
@@ -127,8 +126,7 @@ static bool bc_iscsi_should_fake_dev_reset(struct scsi_cmnd *sc)
 static bool bc_iscsi_should_fake_tgt_reset(struct scsi_cmnd *sc)
 {
 	return bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
-		bc_iscsi_hold_tur &&
-		bc_iscsi_is_fault_lun(sc);
+		bc_iscsi_hold_tur;
 }
 
 #define ISCSI_DBG_CONN(_conn, dbg_fmt, arg...)			\
@@ -2638,11 +2636,17 @@ int iscsi_eh_device_reset(struct scsi_cmnd *sc)
 
 		spin_lock_bh(&session->frwd_lock);
 		memset(hdr, 0, sizeof(*hdr));
-		fail_scsi_tasks(conn, sc->device->lun, DID_ERROR);
+
+		if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1)
+			fail_scsi_tasks(conn, sc->device->lun, DID_ERROR);
+		else
+			fail_scsi_tasks(conn, -1, DID_ERROR);
+
 		session->tmf_state = TMF_INITIAL;
 
 		if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1) {
 			bc_iscsi_fault_active = 0;
+			bc_iscsi_hold_tur = 0;
 		} else {
 			bc_iscsi_fault_active = 0;
 			bc_iscsi_hold_tur = 1;
@@ -2829,6 +2833,7 @@ static int iscsi_eh_target_reset(struct scsi_cmnd *sc)
 		memset(hdr, 0, sizeof(*hdr));
 		fail_scsi_tasks(conn, -1, DID_ERROR);
 		session->tmf_state = TMF_INITIAL;
+		bc_iscsi_fault_active = 0;
 		bc_iscsi_hold_tur = 0;
 		spin_unlock_bh(&session->frwd_lock);
 
