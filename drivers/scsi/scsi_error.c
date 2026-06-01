@@ -4992,7 +4992,7 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 				"%s: Sending target reset to target %d\n",
 				current->comm, id);
 		rtn = scsi_try_target_reset(scmd);
-		if (rtn != SUCCESS && rtn != FAST_IO_FAIL)
+		if (rtn != SUCCESS && rtn != FAST_IO_FAIL) {
 			SCSI_LOG_ERROR_RECOVERY(3,
 				shost_printk(KERN_INFO, shost,
 					     "%s: Target reset failed"
@@ -5002,6 +5002,7 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 					"%s: Target reset failed"
 					" target: %d\n",
 					current->comm, id);
+		}
 		list_for_each_entry_safe(scmd, next, &tmp_list, eh_entry) {
 			if (scmd_id(scmd) != id)
 				continue;
