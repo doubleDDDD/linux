@@ -82,8 +82,19 @@ static bool bc_iscsi_should_hold_xmit(struct scsi_cmnd *sc)
 {
 	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
 		bc_iscsi_fault_active &&
-		bc_iscsi_is_fault_lun(sc))
-		return sc->cmnd[0] != TEST_UNIT_READY;
+		bc_iscsi_is_fault_lun(sc)) {
+		switch (sc->cmnd[0]) {
+		case READ_6:
+		case WRITE_6:
+		case READ_10:
+		case WRITE_10:
+		case READ_16:
+		case WRITE_16:
+			return true;
+		default:
+			return false;
+		}
+	}
 
 	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5) {
 		if (bc_iscsi_fault_active)
@@ -2226,6 +2237,13 @@ enum scsi_timeout_action iscsi_eh_cmd_timed_out(struct scsi_cmnd *sc)
 		rc = SCSI_EH_RESET_TIMER;
 		goto done;
 	}
+
+        if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
+            bc_iscsi_fault_active &&
+            bc_iscsi_is_fault_lun(sc)) {
+                rc = SCSI_EH_NOT_HANDLED;
+                goto done;
+        }
 
 	/*
 	 * If we have sent (at least queued to the network layer) a pdu or
