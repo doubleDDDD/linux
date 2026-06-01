@@ -50,6 +50,87 @@ MODULE_PARM_DESC(debug_libiscsi_eh,
 		 "Turn on debugging for error handling in libiscsi module. "
 		 "Set to 1 to turn on, and zero to turn off. Default is off.");
 
+#define BC_ISCSI_TEST_OFF 0
+#define BC_ISCSI_TEST_P1  1
+#define BC_ISCSI_TEST_P5  5
+
+#define BC_ISCSI_FAULT_LUN 0
+
+static int bc_iscsi_test_mode;
+module_param_named(bc_iscsi_test_mode, bc_iscsi_test_mode, int,
+		S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(bc_iscsi_test_mode, "0=off, 1=P1, 5=P5");
+
+static int bc_iscsi_fault_active;
+module_param_named(bc_iscsi_fault_active, bc_iscsi_fault_active, int,
+		S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(bc_iscsi_fault_active,
+		"1 means normal IO is held for the injected fault scope");
+
+static int bc_iscsi_hold_tur;
+module_param_named(bc_iscsi_hold_tur, bc_iscsi_hold_tur, int,
+		S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(bc_iscsi_hold_tur,
+		"1 means post-reset TEST_UNIT_READY is held");
+
+static bool bc_iscsi_is_fault_lun(struct scsi_cmnd *sc)
+{
+	return sc->device->lun == BC_ISCSI_FAULT_LUN;
+}
+
+static bool bc_iscsi_should_hold_xmit(struct scsi_cmnd *sc)
+{
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc))
+		return sc->cmnd[0] != TEST_UNIT_READY;
+
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5) {
+		if (bc_iscsi_fault_active)
+			return sc->cmnd[0] != TEST_UNIT_READY;
+		if (bc_iscsi_hold_tur)
+			return sc->cmnd[0] == TEST_UNIT_READY;
+	}
+
+	return false;
+}
+
+static bool bc_iscsi_should_fail_abort(struct scsi_cmnd *sc)
+{
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc))
+		return true;
+
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		(bc_iscsi_fault_active || bc_iscsi_hold_tur))
+		return true;
+
+	return false;
+}
+
+static bool bc_iscsi_should_fake_dev_reset(struct scsi_cmnd *sc)
+{
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc))
+		return true;
+
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc))
+		return true;
+
+	return false;
+}
+
+static bool bc_iscsi_should_fake_tgt_reset(struct scsi_cmnd *sc)
+{
+	return bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		bc_iscsi_hold_tur &&
+		bc_iscsi_is_fault_lun(sc);
+}
+
 #define ISCSI_DBG_CONN(_conn, dbg_fmt, arg...)			\
 	do {							\
 		if (iscsi_dbg_lib_conn)				\
@@ -1675,6 +1756,15 @@ check_requeue:
 				fail_scsi_task(task, DID_ABORT);
 			continue;
 		}
+
+                if (bc_iscsi_should_hold_xmit(task->sc)) {
+                        ISCSI_DBG_SESSION(conn->session,
+                                          "bc-test hold cdb=0x%x lun=%llu\n",
+                                          task->sc->cmnd[0],
+                                          (unsigned long long)task->sc->device->lun);
+                        continue;
+                }
+
 		rc = iscsi_xmit_task(conn, task, false);
 		if (rc)
 			goto done;
@@ -2412,6 +2502,9 @@ completion_check:
 	age = session->age;
 	spin_unlock(&session->back_lock);
 
+        if (bc_iscsi_should_fail_abort(sc))
+                goto failed;
+
 	if (task->state == ISCSI_TASK_PENDING) {
 		fail_scsi_task(task, DID_ABORT);
 		goto success;
@@ -2534,9 +2627,36 @@ int iscsi_eh_device_reset(struct scsi_cmnd *sc)
 	/* only have one tmf outstanding at a time */
 	if (session->tmf_state != TMF_INITIAL)
 		goto unlock;
+
+        hdr = &session->tmhdr;
+
+	if (bc_iscsi_should_fake_dev_reset(sc)) {
+		rc = SUCCESS;
+		spin_unlock_bh(&session->frwd_lock);
+
+		iscsi_suspend_tx(conn);
+
+		spin_lock_bh(&session->frwd_lock);
+		memset(hdr, 0, sizeof(*hdr));
+		fail_scsi_tasks(conn, sc->device->lun, DID_ERROR);
+		session->tmf_state = TMF_INITIAL;
+
+		if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1) {
+			bc_iscsi_fault_active = 0;
+		} else {
+			bc_iscsi_fault_active = 0;
+			bc_iscsi_hold_tur = 1;
+		}
+
+		spin_unlock_bh(&session->frwd_lock);
+
+		iscsi_start_tx(conn);
+		goto done;
+	}
+
 	session->tmf_state = TMF_QUEUED;
 
-	hdr = &session->tmhdr;
+	// hdr = &session->tmhdr;
 	iscsi_prep_lun_reset_pdu(sc, hdr);
 
 	if (iscsi_exec_task_mgmt_fn(conn, hdr, session->age,
@@ -2696,9 +2816,28 @@ static int iscsi_eh_target_reset(struct scsi_cmnd *sc)
 	/* only have one tmf outstanding at a time */
 	if (session->tmf_state != TMF_INITIAL)
 		goto unlock;
+
+        hdr = &session->tmhdr;
+
+	if (bc_iscsi_should_fake_tgt_reset(sc)) {
+		rc = SUCCESS;
+		spin_unlock_bh(&session->frwd_lock);
+
+		iscsi_suspend_tx(conn);
+
+		spin_lock_bh(&session->frwd_lock);
+		memset(hdr, 0, sizeof(*hdr));
+		fail_scsi_tasks(conn, -1, DID_ERROR);
+		session->tmf_state = TMF_INITIAL;
+		bc_iscsi_hold_tur = 0;
+		spin_unlock_bh(&session->frwd_lock);
+
+		iscsi_start_tx(conn);
+		goto done;
+	}
 	session->tmf_state = TMF_QUEUED;
 
-	hdr = &session->tmhdr;
+	// hdr = &session->tmhdr;
 	iscsi_prep_tgt_reset_pdu(sc, hdr);
 
 	if (iscsi_exec_task_mgmt_fn(conn, hdr, session->age,
