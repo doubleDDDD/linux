@@ -78,24 +78,35 @@ static bool bc_iscsi_is_fault_lun(struct scsi_cmnd *sc)
 	return sc->device->lun == BC_ISCSI_FAULT_LUN;
 }
 
+static bool bc_iscsi_is_data_io(struct scsi_cmnd *sc)
+{
+	switch (sc->cmnd[0]) {
+	case READ_6:
+	case WRITE_6:
+	case READ_10:
+	case WRITE_10:
+	case READ_16:
+	case WRITE_16:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool bc_iscsi_should_drop_rx_completion(struct scsi_cmnd *sc, int opcode)
+{
+	if (bc_iscsi_test_mode != BC_ISCSI_TEST_P1 ||
+		!bc_iscsi_fault_active ||
+		!bc_iscsi_is_fault_lun(sc) ||
+		!bc_iscsi_is_data_io(sc))
+		return false;
+
+	return opcode == ISCSI_OP_SCSI_CMD_RSP ||
+		opcode == ISCSI_OP_SCSI_DATA_IN;
+}
+
 static bool bc_iscsi_should_hold_xmit(struct scsi_cmnd *sc)
 {
-	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
-		bc_iscsi_fault_active &&
-		bc_iscsi_is_fault_lun(sc)) {
-		switch (sc->cmnd[0]) {
-		case READ_6:
-		case WRITE_6:
-		case READ_10:
-		case WRITE_10:
-		case READ_16:
-		case WRITE_16:
-			return true;
-		default:
-			return false;
-		}
-	}
-
 	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5) {
 		if (bc_iscsi_fault_active)
 			return sc->cmnd[0] != TEST_UNIT_READY;
@@ -1358,9 +1369,43 @@ int __iscsi_complete_pdu(struct iscsi_conn *conn, struct iscsi_hdr *hdr,
 	switch(opcode) {
 	case ISCSI_OP_SCSI_CMD_RSP:
 	case ISCSI_OP_SCSI_DATA_IN:
+		// task = iscsi_itt_to_ctask(conn, hdr->itt);
+		// if (!task)
+		// 	return ISCSI_ERR_BAD_ITT;
+		// task->last_xfer = jiffies;
+		// break;
 		task = iscsi_itt_to_ctask(conn, hdr->itt);
 		if (!task)
 			return ISCSI_ERR_BAD_ITT;
+
+		if (bc_iscsi_should_drop_rx_completion(task->sc, opcode)) {
+			if (opcode == ISCSI_OP_SCSI_CMD_RSP) {
+				struct iscsi_scsi_rsp *rhdr =
+					(struct iscsi_scsi_rsp *)hdr;
+
+				iscsi_update_cmdsn(session,
+							(struct iscsi_nopin *)rhdr);
+				conn->exp_statsn = be32_to_cpu(rhdr->statsn) + 1;
+			} else {
+				struct iscsi_data_rsp *rhdr =
+					(struct iscsi_data_rsp *)hdr;
+
+				if (rhdr->flags & ISCSI_FLAG_DATA_STATUS) {
+					iscsi_update_cmdsn(session,
+								(struct iscsi_nopin *)hdr);
+					conn->exp_statsn =
+						be32_to_cpu(rhdr->statsn) + 1;
+				}
+			}
+
+			ISCSI_DBG_SESSION(session,
+						"bc-test drop rx completion cdb=0x%x lun=%llu opcode=0x%x itt=0x%x\n",
+						task->sc->cmnd[0],
+						(unsigned long long)task->sc->device->lun,
+						opcode, itt);
+			return 0;
+		}
+
 		task->last_xfer = jiffies;
 		break;
 	case ISCSI_OP_R2T:
