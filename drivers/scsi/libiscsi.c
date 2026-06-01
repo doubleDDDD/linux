@@ -164,7 +164,7 @@ static bool bc_iscsi_should_fake_dev_reset(struct scsi_cmnd *sc)
 static bool bc_iscsi_should_fake_tgt_reset(struct scsi_cmnd *sc)
 {
 	return bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
-		bc_iscsi_hold_tur;
+		(bc_iscsi_hold_tur || bc_iscsi_fault_active);
 }
 
 #define ISCSI_DBG_CONN(_conn, dbg_fmt, arg...)			\
