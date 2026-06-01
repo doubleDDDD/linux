@@ -539,7 +539,7 @@ void scsi_eh_cancel_sdev(struct scsi_device *sdev)
 		scsi_eh_finish_work_sequence(shost);
 }
 
-#ifdef CONFIG_SCSI_BCEH_LOG
+#ifdef CONFIG_SCSI_BC_EH_LOG
 static char sdev_locate[64] = {0};
 static char starget_locate[64] = {0};
 static char schannel_locate[64] = {0};
@@ -5158,7 +5158,7 @@ static void scsi_eh_offline_sdevs(struct list_head *work_q,
 	struct scsi_device *sdev;
 
 	list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
-		SCSI_BCEH_SCMD_LOG(scmd->device, "Device offlined - "
+		SCSI_BCEH_SCMD_LOG(scmd, "Device offlined - "
 			    "not ready after error recovery\n");
 		sdev = scmd->device;
 
