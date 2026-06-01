@@ -93,27 +93,38 @@ static bool bc_iscsi_is_data_io(struct scsi_cmnd *sc)
 	}
 }
 
+static bool bc_iscsi_is_tur(struct scsi_cmnd *sc)
+{
+	return sc->cmnd[0] == TEST_UNIT_READY;
+}
+
 static bool bc_iscsi_should_drop_rx_completion(struct scsi_cmnd *sc, int opcode)
 {
-	if (bc_iscsi_test_mode != BC_ISCSI_TEST_P1 ||
-		!bc_iscsi_fault_active ||
-		!bc_iscsi_is_fault_lun(sc) ||
-		!bc_iscsi_is_data_io(sc))
-		return false;
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P1 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc) &&
+		bc_iscsi_is_data_io(sc))
+		goto check_opcode;
 
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		bc_iscsi_fault_active &&
+		bc_iscsi_is_data_io(sc))
+		goto check_opcode;
+
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		bc_iscsi_hold_tur &&
+		bc_iscsi_is_tur(sc))
+		goto check_opcode;
+
+	return false;
+
+check_opcode:
 	return opcode == ISCSI_OP_SCSI_CMD_RSP ||
 		opcode == ISCSI_OP_SCSI_DATA_IN;
 }
 
 static bool bc_iscsi_should_hold_xmit(struct scsi_cmnd *sc)
 {
-	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5) {
-		if (bc_iscsi_fault_active)
-			return sc->cmnd[0] != TEST_UNIT_READY;
-		if (bc_iscsi_hold_tur)
-			return sc->cmnd[0] == TEST_UNIT_READY;
-	}
-
 	return false;
 }
 
@@ -125,7 +136,12 @@ static bool bc_iscsi_should_fail_abort(struct scsi_cmnd *sc)
 		return true;
 
 	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
-		(bc_iscsi_fault_active || bc_iscsi_hold_tur))
+		((bc_iscsi_fault_active &&
+		bc_iscsi_is_fault_lun(sc) &&
+		bc_iscsi_is_data_io(sc)) ||
+		(bc_iscsi_hold_tur &&
+		bc_iscsi_is_fault_lun(sc) &&
+		sc->cmnd[0] == TEST_UNIT_READY)))
 		return true;
 
 	return false;
@@ -2289,6 +2305,13 @@ enum scsi_timeout_action iscsi_eh_cmd_timed_out(struct scsi_cmnd *sc)
                 rc = SCSI_EH_NOT_HANDLED;
                 goto done;
         }
+
+	if (bc_iscsi_test_mode == BC_ISCSI_TEST_P5 &&
+		((bc_iscsi_fault_active && bc_iscsi_is_data_io(sc)) ||
+		(bc_iscsi_hold_tur && sc->cmnd[0] == TEST_UNIT_READY))) {
+		rc = SCSI_EH_NOT_HANDLED;
+		goto done;
+	}
 
 	/*
 	 * If we have sent (at least queued to the network layer) a pdu or
