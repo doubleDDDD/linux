@@ -3291,7 +3291,17 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 	}
 	pr_err("%s host reset done!\n", __func__);
 	spin_lock_irqsave(instance->host->host_lock, flags);
-	if (instance->bc_mega_fault_stage != BC_MEGA_STAGE_IDLE) {
+	if (bc_mega_fault_active &&
+	    bc_mega_fault_mode == BC_MEGA_FAULT_P2 &&
+	    instance->bc_mega_fault_stage == BC_MEGA_STAGE_POST_TRESET_VERIFY) {
+		/*
+		 * P2 stays persistent across host reset: after target reset has
+		 * succeeded, post-reset validation must keep timing out so
+		 * Linux-EH eventually offlines the fault VD.
+		 */
+		instance->bc_mega_held_scmd = NULL;
+		instance->bc_mega_fault_stage = BC_MEGA_STAGE_POST_TRESET_VERIFY;
+	} else if (instance->bc_mega_fault_stage != BC_MEGA_STAGE_IDLE) {
 		instance->bc_mega_fault_stage = BC_MEGA_STAGE_DONE;
 		instance->bc_mega_held_scmd = NULL;
 	} else {
