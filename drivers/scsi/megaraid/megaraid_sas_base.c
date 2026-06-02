@@ -1924,6 +1924,27 @@ bool megasas_bc_mega_abort_should_fail(struct megasas_instance *instance,
 	return fail;
 }
 
+bool megasas_bc_mega_target_reset_should_succeed(
+				struct megasas_instance *instance,
+				struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	bool succeed = false;
+
+	if (!megasas_bc_mega_is_fault_vd(instance, scmd))
+		return false;
+
+	spin_lock_irqsave(instance->host->host_lock, flags);
+	if (instance->bc_mega_held_scmd == scmd &&
+		instance->bc_mega_fault_stage == BC_MEGA_STAGE_PRE_TIMEOUT &&
+		(bc_mega_fault_mode == BC_MEGA_FAULT_P2 ||
+		 bc_mega_fault_mode == BC_MEGA_FAULT_P3))
+		succeed = true;
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
+
+	return succeed;
+}
+
 void megasas_bc_mega_post_target_reset(struct megasas_instance *instance,
 				struct scsi_cmnd *scmd, int ret)
 {
@@ -3246,6 +3267,7 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 {
 	int ret;
 	struct megasas_instance *instance;
+	unsigned long flags;
 
 	instance = (struct megasas_instance *)scmd->device->host->hostdata;
 
@@ -3265,10 +3287,17 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 	} else {
 		megasas_dump_fusion_io(scmd);
 		ret = megasas_reset_fusion(scmd->device->host,
-				SCSIIO_TIMEOUT_OCR);
+					SCSIIO_TIMEOUT_OCR);
 	}
 	pr_err("%s host reset done!\n", __func__);
-	megasas_bc_mega_reset_state(instance);
+	spin_lock_irqsave(instance->host->host_lock, flags);
+	if (instance->bc_mega_fault_stage != BC_MEGA_STAGE_IDLE) {
+		instance->bc_mega_fault_stage = BC_MEGA_STAGE_DONE;
+		instance->bc_mega_held_scmd = NULL;
+	} else {
+		instance->bc_mega_tur_budget_left = bc_mega_tur_fail_budget;
+	}
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
 	return ret;
 }
 

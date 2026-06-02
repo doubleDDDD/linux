@@ -2781,6 +2781,9 @@ bool megasas_bc_mega_is_fault_vd(struct megasas_instance *instance,
 				struct scsi_cmnd *scmd);
 bool megasas_bc_mega_abort_should_fail(struct megasas_instance *instance,
 				struct scsi_cmnd *scmd);
+bool megasas_bc_mega_target_reset_should_succeed(
+				struct megasas_instance *instance,
+				struct scsi_cmnd *scmd);
 void megasas_bc_mega_post_target_reset(struct megasas_instance *instance,
 				struct scsi_cmnd *scmd, int ret);
 

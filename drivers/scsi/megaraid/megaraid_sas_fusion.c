@@ -4846,6 +4846,13 @@ int megasas_reset_target_fusion(struct scsi_cmnd *scmd)
 		return ret;
 	}
 
+	if (megasas_bc_mega_target_reset_should_succeed(instance, scmd)) {
+		scmd_printk(KERN_NOTICE, scmd,
+				"bc-mega: force target reset SUCCESS for injected command\n");
+		megasas_bc_mega_post_target_reset(instance, scmd, SUCCESS);
+		return SUCCESS;
+	}
+
 	if (!mr_device_priv_data) {
 		sdev_printk(KERN_INFO, scmd->device,
 			    "device been deleted! scmd: (0x%p)\n", scmd);
