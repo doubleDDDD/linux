@@ -418,6 +418,17 @@ static int mpt3sas_bc_mpt_target_reset_action(struct MPT3SAS_ADAPTER *ioc,
 			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
 			action = SUCCESS;
 		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P5 &&
+			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
+			/*
+			 * BC-EH may converge directly to target scope for P5
+			 * without issuing a device reset first. Treat that
+			 * target reset as the terminal recovery action and
+			 * clear the injected timeout state immediately.
+			 */
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
+			action = SUCCESS;
+		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P5 &&
 			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_POST_DRESET_VERIFY) {
 			ioc->bc_mpt_held_scmd = NULL;
 			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
