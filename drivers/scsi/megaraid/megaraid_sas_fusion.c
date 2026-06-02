@@ -4878,8 +4878,8 @@ int megasas_reset_target_fusion(struct scsi_cmnd *scmd)
 		(ret == SUCCESS) ? "SUCCESS" : "FAILED");
 
 out:
-	ret = SUCCESS;
-	instance->target_reset_succ = true;
+	// ret = SUCCESS;
+	// instance->target_reset_succ = true;
 	return ret;
 }
 

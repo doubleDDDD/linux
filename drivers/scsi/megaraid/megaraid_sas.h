@@ -2466,7 +2466,7 @@ struct megasas_instance {
 	u8  low_latency_index_start;
 	int perf_mode;
 	int iopoll_q_count;
-	bool target_reset_succ;
+	// bool target_reset_succ;
 };
 
 struct MR_LD_VF_MAP {
