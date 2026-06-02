@@ -3001,8 +3001,6 @@ scsih_tm_post_processing(struct MPT3SAS_ADAPTER *ioc, u16 handle,
 	if (rc == SUCCESS)
 		return rc;
 
-	//return SUCCESS; /* for 模拟注入错误 */
-
 	ioc_info(ioc,
 	    "Poll ReplyDescriptor queues for completion of"
 	    " smid(%d), task_type(0x%02x), handle(0x%04x)\n",
@@ -3050,12 +3048,9 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	Mpi2SCSITaskManagementReply_t *mpi_reply;
 	Mpi25SCSIIORequest_t *request;
 	u16 smid = 0;
-	u16 _smid = 0;
-	struct scsi_cmnd *scmd;
 	u32 ioc_state;
 	int rc;
 	u8 issue_reset = 0;
-	struct scsiio_tracker *st;
 
 	lockdep_assert_held(&ioc->tm_cmds.mutex);
 
@@ -3099,9 +3094,6 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	dtmprintk(ioc,
 		  ioc_info(ioc, "sending tm: handle(0x%04x), task_type(0x%02x), smid(%d), timeout(%d), tr_method(0x%x)\n",
 			   handle, type, smid_task, timeout, tr_method));
-
-	ioc_info(ioc, "sending tm: handle(0x%04x), task_type(0x%02x), smid(%d), timeout(%d), tr_method(0x%x)\n",
-			   handle, type, smid_task, timeout, tr_method);
 	ioc->tm_cmds.status = MPT3_CMD_PENDING;
 	mpi_request = mpt3sas_base_get_msg_frame(ioc, smid);
 	ioc->tm_cmds.smid = smid;
@@ -3118,16 +3110,7 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	mpt3sas_scsih_set_tm_flag(ioc, handle);
 	init_completion(&ioc->tm_cmds.done);
 	ioc->put_smid_hi_priority(ioc, smid, msix_task);
-
-	// if (type == MPI2_SCSITASKMGMT_TASKTYPE_ABORT_TASK
-	// 		|| type == MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET
-	// 		|| type == MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET)
-	// 		msleep(5000); /* 模拟10s的超时而且不触发host直接reset */
-
 	wait_for_completion_timeout(&ioc->tm_cmds.done, timeout*HZ);
-
-	pr_err("%s (ioc->tm_cmds.status & MPT3_CMD_COMPLETE)=%d\n", __func__, ioc->tm_cmds.status & MPT3_CMD_COMPLETE);
-
 	if (!(ioc->tm_cmds.status & MPT3_CMD_COMPLETE)) {
 		mpt3sas_check_cmd_timeout(ioc,
 		    ioc->tm_cmds.status, mpi_request,
@@ -3143,8 +3126,6 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 	/* sync IRQs in case those were busy during flush. */
 	mpt3sas_base_sync_reply_irqs(ioc, 0);
 
-	pr_err("%s (ioc->tm_cmds.status & MPT3_CMD_REPLY_VALID)=%d\n", __func__, ioc->tm_cmds.status & MPT3_CMD_REPLY_VALID);
-
 	if (ioc->tm_cmds.status & MPT3_CMD_REPLY_VALID) {
 		mpt3sas_trigger_master(ioc, MASTER_TRIGGER_TASK_MANAGMENT);
 		mpi_reply = ioc->tm_cmds.reply;
@@ -3153,10 +3134,6 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 				   le16_to_cpu(mpi_reply->IOCStatus),
 				   le32_to_cpu(mpi_reply->IOCLogInfo),
 				   le32_to_cpu(mpi_reply->TerminationCount)));
-		ioc_info(ioc, "complete tm: ioc_status(0x%04x), loginfo(0x%08x), term_count(0x%08x)\n",
-				le16_to_cpu(mpi_reply->IOCStatus),
-				le32_to_cpu(mpi_reply->IOCLogInfo),
-				le32_to_cpu(mpi_reply->TerminationCount));
 		if (ioc->logging_level & MPT_DEBUG_TM) {
 			_scsih_response_code(ioc, mpi_reply->ResponseCode);
 			if (mpi_reply->IOCStatus)
@@ -3164,20 +3141,6 @@ mpt3sas_scsih_issue_tm(struct MPT3SAS_ADAPTER *ioc, u16 handle, uint channel,
 				    sizeof(Mpi2SCSITaskManagementRequest_t)/4);
 		}
 	}
-
-	if (type == MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET
-		 || type == MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET) {
-		for (_smid = 1; _smid <= ioc->shost->can_queue; _smid++) {
-			scmd = mpt3sas_scsih_scsi_lookup_get(ioc, _smid);
-			if (scmd) {
-				st = scsi_cmd_priv(scmd);
-				pr_err("%s here is a scmd smid=%d\n", __func__, st->smid);
-				mpt3sas_base_free_smid(ioc, _smid);
-			}
-		}
-	}
-
-	pr_err("%s tmf type=%d\n", __func__, type);
 
 	switch (type) {
 	case MPI2_SCSITASKMGMT_TASKTYPE_ABORT_TASK:
@@ -3393,8 +3356,6 @@ scsih_abort(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_dev_reset_success = false;
-
 /**
  * scsih_dev_reset - eh threads main device reset routine
  * @scmd: pointer to scsi command object
@@ -3462,13 +3423,11 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 		MPI2_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET, 0, 0,
 		tr_timeout, tr_method);
 	/* Check for busy commands after reset */
-	// pr_err("%s r=%d if busy=%d\n", __func__, r, scsi_device_busy(scmd->device));
-	// r = FAILED;
+	if (r == SUCCESS && scsi_device_busy(scmd->device))
+		r = FAILED;
  out:
 	sdev_printk(KERN_INFO, scmd->device, "device reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
-	if (r == SUCCESS)
-		scsih_dev_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -3478,7 +3437,6 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_target_reset_success = false;
 /**
  * scsih_target_reset - eh threads main target reset routine
  * @scmd: pointer to scsi command object
@@ -3544,15 +3502,11 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 		MPI2_SCSITASKMGMT_TASKTYPE_TARGET_RESET, 0, 0,
 	    tr_timeout, tr_method);
 	/* Check for busy commands after reset */
-	//pr_err("%s r=0x%x starget->target_busy=%d\n", __func__, r, atomic_read(&starget->target_busy));
-	// if (r == SUCCESS && atomic_read(&starget->target_busy));
-	// r = FAILED;
+	if (r == SUCCESS && atomic_read(&starget->target_busy))
+		r = FAILED;
  out:
 	starget_printk(KERN_INFO, starget, "target reset: %s scmd(0x%p)\n",
 	    ((r == SUCCESS) ? "SUCCESS" : "FAILED"), scmd);
-
-	if (r == SUCCESS)
-		scsih_target_reset_success = true;
 
 	if (sas_device)
 		sas_device_put(sas_device);
@@ -3561,30 +3515,7 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 	return r;
 }
 
-static bool scsih_bus_reset_success = false;
-static int
-scsih_bus_reset(struct scsi_cmnd *scmd)
-{
-	struct MPT3SAS_ADAPTER *ioc = shost_priv(scmd->device->host);
-	struct scsi_cmnd *_scmd;
-	struct scsiio_tracker *st;
-	u16 _smid = 0;
 
-	pr_err("%s attempting channel reset! scmd(0x%p)\n", __func__, scmd);
-	for (_smid = 1; _smid <= ioc->shost->can_queue; _smid++) {
-		_scmd = mpt3sas_scsih_scsi_lookup_get(ioc, _smid);
-		if (_scmd) {
-			st = scsi_cmd_priv(_scmd);
-			mpt3sas_base_free_smid(ioc, _smid);
-		}
-	}
-
-	scsih_bus_reset_success = true;
-	return SUCCESS;
-	// return FAILED;
-}
-
-static bool scsih_host_reset_success = false;
 /**
  * scsih_host_reset - eh threads main host reset routine
  * @scmd: pointer to scsi command object
@@ -3608,12 +3539,9 @@ scsih_host_reset(struct scsi_cmnd *scmd)
 
 	retval = mpt3sas_base_hard_reset_handler(ioc, FORCE_BIG_HAMMER);
 	r = (retval < 0) ? FAILED : SUCCESS;
-	// r = FAILED;
 out:
 	ioc_info(ioc, "host reset: %s scmd(0x%p)\n",
 		 r == SUCCESS ? "SUCCESS" : "FAILED", scmd);
-	if (r == SUCCESS)
-		scsih_host_reset_success = true;
 
 	return r;
 }
@@ -5179,8 +5107,6 @@ _scsih_eedp_error_handling(struct scsi_cmnd *scmd, u16 ioc_status)
 	set_host_byte(scmd, DID_ABORT);
 }
 
-#include <linux/blk-mq.h>
-static u64 overtimecount;
 /**
  * scsih_qcmd - main scsi request entry point
  * @shost: SCSI host pointer
@@ -5206,15 +5132,9 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	u32 mpi_control;
 	u16 smid;
 	u16 handle;
-	struct blk_mq_ctx *mq_ctx;
-	struct blk_mq_hw_ctx *mq_hctx;
 
-	mq_ctx = rq->mq_ctx;
-	mq_hctx = rq->mq_hctx;
-	//if (ioc->logging_level & MPT_DEBUG_SCSI)
-	scsi_print_command(scmd);
-	//dump_stack();
-	//pr_err("%s nr_ctx=%d, queue_num=%d\n", __func__, mq_hctx->nr_ctx, mq_hctx->queue_num);
+	if (ioc->logging_level & MPT_DEBUG_SCSI)
+		scsi_print_command(scmd);
 
 	sas_device_priv_data = scmd->device->hostdata;
 	if (!sas_device_priv_data || !sas_device_priv_data->sas_target) {
@@ -5345,15 +5265,6 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	if (raid_device && raid_device->direct_io_enabled)
 		mpt3sas_setup_direct_io(ioc, scmd,
 			raid_device, mpi_request);
-
-	/* KIOXIA/SAMSUNG/BROADCOM */
-	if (!scsih_dev_reset_success) {
-		overtimecount++;
-		if (overtimecount > 1888 && strstr(scmd->device->vendor, "KIOXIA")) {
-			pr_err("%s check timeout %lld smid=%d!!!\n", __func__, overtimecount, smid);
-			return 0;
-		}
-	}
 
 	if (likely(mpi_request->Function == MPI2_FUNCTION_SCSI_IO_REQUEST)) {
 		if (sas_target_priv_data->flags & MPT_TARGET_FASTPATH_IO) {
@@ -12059,8 +11970,7 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.eh_abort_handler		= scsih_abort,
 	.eh_device_reset_handler	= scsih_dev_reset,
 	.eh_target_reset_handler	= scsih_target_reset,
-	.eh_bus_reset_handler	= scsih_bus_reset,
-	.eh_host_reset_handler	= scsih_host_reset,
+	.eh_host_reset_handler		= scsih_host_reset,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,
