@@ -4874,6 +4874,7 @@ int megasas_reset_target_fusion(struct scsi_cmnd *scmd)
 			mr_device_priv_data);
 	mr_device_priv_data->tm_busy = false;
 	mutex_unlock(&instance->reset_mutex);
+	megasas_bc_mega_post_target_reset(instance, scmd, ret);
 	scmd_printk(KERN_NOTICE, scmd, "target reset %s!!\n",
 		(ret == SUCCESS) ? "SUCCESS" : "FAILED");
 

@@ -56,6 +56,22 @@ module_param_named(max_sectors, max_sectors, int, 0444);
 MODULE_PARM_DESC(max_sectors,
 	"Maximum number of sectors per IO command");
 
+static int bc_mega_fault_mode;
+module_param_named(bc_mega_fault_mode, bc_mega_fault_mode, int, 0644);
+MODULE_PARM_DESC(bc_mega_fault_mode, "BC mega fault mode: 0=off, 2=P2, 3=P3");
+
+static int bc_mega_fault_target_id = -1;
+module_param_named(bc_mega_fault_target_id, bc_mega_fault_target_id, int, 0644);
+MODULE_PARM_DESC(bc_mega_fault_target_id, "Fault logical target id");
+
+static bool bc_mega_fault_active;
+module_param_named(bc_mega_fault_active, bc_mega_fault_active, bool, 0644);
+MODULE_PARM_DESC(bc_mega_fault_active, "Arm/disarm BC mega fault injection");
+
+static int bc_mega_tur_fail_budget = -1;
+module_param_named(bc_mega_tur_fail_budget, bc_mega_tur_fail_budget, int, 0644);
+MODULE_PARM_DESC(bc_mega_tur_fail_budget, "P2 TUR timeout count, -1 means infinite");
+
 static int msix_disable;
 module_param(msix_disable, int, 0444);
 MODULE_PARM_DESC(msix_disable, "Disable MSI-X interrupt handling. Default: 0");
@@ -1775,6 +1791,165 @@ out_return_cmd:
 	return SCSI_MLQUEUE_HOST_BUSY;
 }
 
+bool megasas_bc_mega_is_fault_vd(struct megasas_instance *instance,
+				struct scsi_cmnd *scmd)
+{
+	if (!instance || !scmd || bc_mega_fault_target_id < 0)
+		return false;
+	if (!MEGASAS_IS_LOGICAL(scmd->device))
+		return false;
+	if (scmd->device->lun)
+		return false;
+	return MEGASAS_TARGET_ID(scmd->device) == bc_mega_fault_target_id;
+}
+
+static bool megasas_bc_mega_is_tur(struct scsi_cmnd *scmd)
+{
+	return scmd && scmd->cmnd[0] == TEST_UNIT_READY;
+}
+
+static bool megasas_bc_mega_is_data_io(struct scsi_cmnd *scmd)
+{
+	switch (scmd->cmnd[0]) {
+	case READ_6:
+	case WRITE_6:
+	case READ_10:
+	case WRITE_10:
+	case READ_12:
+	case WRITE_12:
+	case READ_16:
+	case WRITE_16:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void megasas_bc_mega_reset_state(struct megasas_instance *instance)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(instance->host->host_lock, flags);
+	instance->bc_mega_fault_stage = BC_MEGA_STAGE_IDLE;
+	instance->bc_mega_tur_budget_left = bc_mega_tur_fail_budget;
+	instance->bc_mega_held_scmd = NULL;
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
+}
+
+static int megasas_bc_mega_qcmd_inject(struct megasas_instance *instance,
+				struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	int rc = -1;
+
+	if (!bc_mega_fault_active ||
+		(bc_mega_fault_mode != BC_MEGA_FAULT_P2 &&
+		bc_mega_fault_mode != BC_MEGA_FAULT_P3) ||
+		bc_mega_fault_target_id < 0) {
+		if (instance->bc_mega_fault_stage != BC_MEGA_STAGE_IDLE)
+			megasas_bc_mega_reset_state(instance);
+		return -1;
+	}
+
+	if (!megasas_bc_mega_is_fault_vd(instance, scmd))
+		return -1;
+
+	spin_lock_irqsave(instance->host->host_lock, flags);
+
+	switch (instance->bc_mega_fault_stage) {
+	case BC_MEGA_STAGE_IDLE:
+		if (megasas_bc_mega_is_data_io(scmd) &&
+			!instance->bc_mega_held_scmd) {
+			instance->bc_mega_held_scmd = scmd;
+			instance->bc_mega_fault_stage = BC_MEGA_STAGE_PRE_TIMEOUT;
+			instance->bc_mega_tur_budget_left = bc_mega_tur_fail_budget;
+			rc = 0;
+		}
+		break;
+
+	case BC_MEGA_STAGE_PRE_TIMEOUT:
+		if (megasas_bc_mega_is_data_io(scmd))
+			rc = SCSI_MLQUEUE_DEVICE_BUSY;
+		break;
+
+	case BC_MEGA_STAGE_POST_TRESET_VERIFY:
+		if (bc_mega_fault_mode == BC_MEGA_FAULT_P2 &&
+			megasas_bc_mega_is_tur(scmd)) {
+			if (instance->bc_mega_tur_budget_left == 0) {
+				instance->bc_mega_fault_stage = BC_MEGA_STAGE_DONE;
+				instance->bc_mega_held_scmd = NULL;
+				rc = -1;
+			} else {
+				if (instance->bc_mega_tur_budget_left > 0)
+					instance->bc_mega_tur_budget_left--;
+				instance->bc_mega_held_scmd = scmd;
+				rc = 0;
+			}
+		} else if (megasas_bc_mega_is_data_io(scmd)) {
+			rc = SCSI_MLQUEUE_DEVICE_BUSY;
+		}
+		break;
+
+	case BC_MEGA_STAGE_DONE:
+	default:
+		break;
+	}
+
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
+
+	if (rc == 0)
+		scmd_printk(KERN_NOTICE, scmd,
+				"bc-mega: swallow opcode=0x%x stage=%u mode=%d target=%d\n",
+				scmd->cmnd[0], instance->bc_mega_fault_stage,
+				bc_mega_fault_mode, bc_mega_fault_target_id);
+
+	return rc;
+}
+
+bool megasas_bc_mega_abort_should_fail(struct megasas_instance *instance,
+				struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	bool fail = false;
+
+	if (!megasas_bc_mega_is_fault_vd(instance, scmd))
+		return false;
+
+	spin_lock_irqsave(instance->host->host_lock, flags);
+	if (instance->bc_mega_held_scmd == scmd &&
+		instance->bc_mega_fault_stage != BC_MEGA_STAGE_DONE)
+		fail = true;
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
+
+	return fail;
+}
+
+void megasas_bc_mega_post_target_reset(struct megasas_instance *instance,
+				struct scsi_cmnd *scmd, int ret)
+{
+	unsigned long flags;
+	u8 stage;
+
+	if (ret != SUCCESS || !megasas_bc_mega_is_fault_vd(instance, scmd))
+		return;
+
+	spin_lock_irqsave(instance->host->host_lock, flags);
+	stage = instance->bc_mega_fault_stage;
+
+	if (bc_mega_fault_mode == BC_MEGA_FAULT_P3 &&
+		stage == BC_MEGA_STAGE_PRE_TIMEOUT) {
+		instance->bc_mega_held_scmd = NULL;
+		instance->bc_mega_fault_stage = BC_MEGA_STAGE_DONE;
+	} else if (bc_mega_fault_mode == BC_MEGA_FAULT_P2 &&
+			(stage == BC_MEGA_STAGE_PRE_TIMEOUT ||
+			stage == BC_MEGA_STAGE_POST_TRESET_VERIFY)) {
+		instance->bc_mega_held_scmd = NULL;
+		instance->bc_mega_fault_stage = BC_MEGA_STAGE_POST_TRESET_VERIFY;
+	}
+
+	spin_unlock_irqrestore(instance->host->host_lock, flags);
+}
+
 /**
  * megasas_queue_command -	Queue entry point
  * @shost:			adapter SCSI host
@@ -1786,6 +1961,7 @@ megasas_queue_command(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	struct megasas_instance *instance;
 	struct MR_PRIV_DEVICE *mr_device_priv_data;
 	u32 ld_tgt_id;
+	int ret;
 
 	instance = (struct megasas_instance *)
 	    scmd->device->host->hostdata;
@@ -1851,6 +2027,10 @@ megasas_queue_command(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		scmd->result = DID_OK << 16;
 		goto out_done;
 	}
+
+	ret = megasas_bc_mega_qcmd_inject(instance, scmd);
+	if (ret >= 0)
+		return ret;
 
 	return instance->instancet->build_and_issue_cmd(instance, scmd);
 
@@ -3088,7 +3268,7 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 				SCSIIO_TIMEOUT_OCR);
 	}
 	pr_err("%s host reset done!\n", __func__);
-
+	megasas_bc_mega_reset_state(instance);
 	return ret;
 }
 
