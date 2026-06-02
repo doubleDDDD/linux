@@ -4752,6 +4752,12 @@ int megasas_task_abort_fusion(struct scsi_cmnd *scmd)
 
 	instance = (struct megasas_instance *)scmd->device->host->hostdata;
 
+	if (megasas_bc_mega_abort_should_fail(instance, scmd)) {
+		scmd_printk(KERN_NOTICE, scmd,
+				"bc-mega: force abort FAILED for swallowed command\n");
+		return FAILED;
+	}
+
 	if (atomic_read(&instance->adprecovery) != MEGASAS_HBA_OPERATIONAL) {
 		dev_err(&instance->pdev->dev, "Controller is not OPERATIONAL,"
 		"SCSI host:%d\n", instance->host->host_no);

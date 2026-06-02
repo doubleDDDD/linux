@@ -2473,8 +2473,8 @@ struct megasas_instance {
 
 enum bc_mega_fault_mode {
 	BC_MEGA_FAULT_OFF = 0,
-	BC_MEGA_FAULT_P2,
-	BC_MEGA_FAULT_P3,
+	BC_MEGA_FAULT_P2 = 2,
+	BC_MEGA_FAULT_P3 = 3,
 };
 
 enum bc_mega_fault_stage {
