@@ -1797,7 +1797,7 @@ static void scsi_eh_queue_reset_work(struct scsi_device *sdev)
 	queue_delayed_work(sdev->host->eh_process, &sdev->eh_reset_work, HZ / 100);
 }
 
-/* 最关键的 checkpoint */
+/* 最关键的  checkpoint */
 void scsi_eh_check_point(struct work_struct *work)
 {
 	struct scsi_device *sdev = container_of(work, struct scsi_device, checkpoint_work.work);
