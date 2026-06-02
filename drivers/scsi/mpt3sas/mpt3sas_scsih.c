@@ -173,9 +173,261 @@ module_param(host_tagset_enable, int, 0444);
 MODULE_PARM_DESC(host_tagset_enable,
 	"Shared host tagset enable/disable Default: enable(1)");
 
+static int bc_mpt_fault_mode;
+module_param_named(bc_mpt_fault_mode, bc_mpt_fault_mode, int, 0644);
+MODULE_PARM_DESC(bc_mpt_fault_mode,
+	"BC mpt fault mode: 0=off, 2=P2, 3=P3, 5=P5");
+
+static int bc_mpt_fault_target_id = -1;
+module_param_named(bc_mpt_fault_target_id, bc_mpt_fault_target_id, int, 0644);
+MODULE_PARM_DESC(bc_mpt_fault_target_id, "Fault target id");
+
+static int bc_mpt_fault_channel;
+module_param_named(bc_mpt_fault_channel, bc_mpt_fault_channel, int, 0644);
+MODULE_PARM_DESC(bc_mpt_fault_channel, "Fault channel id");
+
+static bool bc_mpt_fault_active;
+module_param_named(bc_mpt_fault_active, bc_mpt_fault_active, bool, 0644);
+MODULE_PARM_DESC(bc_mpt_fault_active, "Arm/disarm BC mpt fault injection");
+
+static int bc_mpt_tur_fail_budget = -1;
+module_param_named(bc_mpt_tur_fail_budget, bc_mpt_tur_fail_budget, int, 0644);
+MODULE_PARM_DESC(bc_mpt_tur_fail_budget,
+	"P2 TUR timeout count after target reset, -1 means infinite");
+
 /* raid transport support */
 static struct raid_template *mpt3sas_raid_template;
 static struct raid_template *mpt2sas_raid_template;
+
+enum {
+	BC_MPT_FAULT_OFF = 0,
+	BC_MPT_FAULT_P2 = 2,
+	BC_MPT_FAULT_P3 = 3,
+	BC_MPT_FAULT_P5 = 5,
+};
+
+enum {
+	BC_MPT_STAGE_IDLE = 0,
+	BC_MPT_STAGE_PRE_TIMEOUT,
+	BC_MPT_STAGE_POST_DRESET_VERIFY,
+	BC_MPT_STAGE_POST_TRESET_VERIFY,
+	BC_MPT_STAGE_DONE,
+};
+
+static bool mpt3sas_bc_mpt_is_tur(struct scsi_cmnd *scmd)
+{
+	return scmd && scmd->cmnd[0] == TEST_UNIT_READY;
+}
+
+static bool mpt3sas_bc_mpt_is_data_io(struct scsi_cmnd *scmd)
+{
+	switch (scmd->cmnd[0]) {
+	case READ_6:
+	case WRITE_6:
+	case READ_10:
+	case WRITE_10:
+	case READ_12:
+	case WRITE_12:
+	case READ_16:
+	case WRITE_16:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool mpt3sas_bc_mpt_is_fault_sdev(struct scsi_cmnd *scmd)
+{
+	if (!bc_mpt_fault_active || !scmd || !scmd->device ||
+	    bc_mpt_fault_target_id < 0)
+		return false;
+
+	if (bc_mpt_fault_mode != BC_MPT_FAULT_P2 &&
+	    bc_mpt_fault_mode != BC_MPT_FAULT_P3 &&
+	    bc_mpt_fault_mode != BC_MPT_FAULT_P5)
+		return false;
+
+	return scmd->device->channel == bc_mpt_fault_channel &&
+	       scmd->device->id == bc_mpt_fault_target_id &&
+	       scmd->device->lun == 0;
+}
+
+static void mpt3sas_bc_mpt_reset_state(struct MPT3SAS_ADAPTER *ioc)
+{
+	unsigned long flags;
+
+	if (!ioc || !ioc->shost)
+		return;
+
+	spin_lock_irqsave(ioc->shost->host_lock, flags);
+	ioc->bc_mpt_fault_stage = BC_MPT_STAGE_IDLE;
+	ioc->bc_mpt_tur_budget_left = bc_mpt_tur_fail_budget;
+	ioc->bc_mpt_held_scmd = NULL;
+	spin_unlock_irqrestore(ioc->shost->host_lock, flags);
+}
+
+static int mpt3sas_bc_mpt_qcmd_inject(struct MPT3SAS_ADAPTER *ioc,
+				      struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	int rc = -1;
+
+	if (!bc_mpt_fault_active ||
+	    (bc_mpt_fault_mode != BC_MPT_FAULT_P2 &&
+	     bc_mpt_fault_mode != BC_MPT_FAULT_P3 &&
+	     bc_mpt_fault_mode != BC_MPT_FAULT_P5) ||
+	    bc_mpt_fault_target_id < 0) {
+		if (ioc->bc_mpt_fault_stage != BC_MPT_STAGE_IDLE)
+			mpt3sas_bc_mpt_reset_state(ioc);
+		return -1;
+	}
+
+	if (!mpt3sas_bc_mpt_is_fault_sdev(scmd))
+		return -1;
+
+	spin_lock_irqsave(ioc->shost->host_lock, flags);
+
+	switch (ioc->bc_mpt_fault_stage) {
+	case BC_MPT_STAGE_IDLE:
+		if (mpt3sas_bc_mpt_is_data_io(scmd) && !ioc->bc_mpt_held_scmd) {
+			ioc->bc_mpt_held_scmd = scmd;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_PRE_TIMEOUT;
+			ioc->bc_mpt_tur_budget_left = bc_mpt_tur_fail_budget;
+			rc = 0;
+		}
+		break;
+
+	case BC_MPT_STAGE_PRE_TIMEOUT:
+		if (mpt3sas_bc_mpt_is_data_io(scmd))
+			rc = SCSI_MLQUEUE_DEVICE_BUSY;
+		break;
+
+	case BC_MPT_STAGE_POST_DRESET_VERIFY:
+		if (bc_mpt_fault_mode == BC_MPT_FAULT_P5 &&
+		    mpt3sas_bc_mpt_is_tur(scmd)) {
+			ioc->bc_mpt_held_scmd = scmd;
+			rc = 0;
+		} else if (mpt3sas_bc_mpt_is_data_io(scmd)) {
+			rc = SCSI_MLQUEUE_DEVICE_BUSY;
+		}
+		break;
+
+	case BC_MPT_STAGE_POST_TRESET_VERIFY:
+		if (bc_mpt_fault_mode == BC_MPT_FAULT_P2 &&
+		    mpt3sas_bc_mpt_is_tur(scmd)) {
+			if (ioc->bc_mpt_tur_budget_left == 0) {
+				ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
+				ioc->bc_mpt_held_scmd = NULL;
+				rc = -1;
+			} else {
+				if (ioc->bc_mpt_tur_budget_left > 0)
+					ioc->bc_mpt_tur_budget_left--;
+				ioc->bc_mpt_held_scmd = scmd;
+				rc = 0;
+			}
+		} else if (mpt3sas_bc_mpt_is_data_io(scmd)) {
+			rc = SCSI_MLQUEUE_DEVICE_BUSY;
+		}
+		break;
+
+	case BC_MPT_STAGE_DONE:
+	default:
+		break;
+	}
+
+	spin_unlock_irqrestore(ioc->shost->host_lock, flags);
+
+	if (rc == 0)
+		sdev_printk(KERN_NOTICE, scmd->device,
+		    "bc-mpt: swallow opcode=0x%x stage=%u mode=%d channel=%d target=%d\n",
+		    scmd->cmnd[0], ioc->bc_mpt_fault_stage, bc_mpt_fault_mode,
+		    bc_mpt_fault_channel, bc_mpt_fault_target_id);
+
+	return rc;
+}
+
+static bool mpt3sas_bc_mpt_abort_should_fail(struct MPT3SAS_ADAPTER *ioc,
+				      struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	bool fail = false;
+
+	if (!ioc || !mpt3sas_bc_mpt_is_fault_sdev(scmd))
+		return false;
+
+	spin_lock_irqsave(ioc->shost->host_lock, flags);
+	if (ioc->bc_mpt_held_scmd == scmd &&
+	    ioc->bc_mpt_fault_stage != BC_MPT_STAGE_DONE)
+		fail = true;
+	spin_unlock_irqrestore(ioc->shost->host_lock, flags);
+
+	return fail;
+}
+
+static int mpt3sas_bc_mpt_dev_reset_action(struct MPT3SAS_ADAPTER *ioc,
+					   struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	int action = -1;
+
+	if (!ioc || !mpt3sas_bc_mpt_is_fault_sdev(scmd))
+		return -1;
+
+	spin_lock_irqsave(ioc->shost->host_lock, flags);
+	if (ioc->bc_mpt_held_scmd == scmd &&
+	    ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
+		switch (bc_mpt_fault_mode) {
+		case BC_MPT_FAULT_P2:
+		case BC_MPT_FAULT_P3:
+			action = FAILED;
+			break;
+		case BC_MPT_FAULT_P5:
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_POST_DRESET_VERIFY;
+			action = SUCCESS;
+			break;
+		default:
+			break;
+		}
+	}
+	spin_unlock_irqrestore(ioc->shost->host_lock, flags);
+
+	return action;
+}
+
+static int mpt3sas_bc_mpt_target_reset_action(struct MPT3SAS_ADAPTER *ioc,
+					      struct scsi_cmnd *scmd)
+{
+	unsigned long flags;
+	int action = -1;
+
+	if (!ioc || !mpt3sas_bc_mpt_is_fault_sdev(scmd))
+		return -1;
+
+	spin_lock_irqsave(ioc->shost->host_lock, flags);
+	if (ioc->bc_mpt_held_scmd == scmd) {
+		if (bc_mpt_fault_mode == BC_MPT_FAULT_P2 &&
+		    ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_POST_TRESET_VERIFY;
+			ioc->bc_mpt_tur_budget_left = bc_mpt_tur_fail_budget;
+			action = SUCCESS;
+		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P3 &&
+			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
+			action = SUCCESS;
+		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P5 &&
+			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_POST_DRESET_VERIFY) {
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_DONE;
+			action = SUCCESS;
+		}
+	}
+	spin_unlock_irqrestore(ioc->shost->host_lock, flags);
+
+	return action;
+}
 
 
 /**
@@ -3316,6 +3568,13 @@ scsih_abort(struct scsi_cmnd *scmd)
 		goto out;
 	}
 
+	if (mpt3sas_bc_mpt_abort_should_fail(ioc, scmd)) {
+		sdev_printk(KERN_NOTICE, scmd->device,
+		    "bc-mpt: force abort FAILED for swallowed command\n");
+		r = FAILED;
+		goto out;
+	}
+
 	/* check for completed command */
 	if (st == NULL || st->cb_idx == 0xFF) {
 		sdev_printk(KERN_INFO, scmd->device, "No reference found at "
@@ -3389,6 +3648,14 @@ scsih_dev_reset(struct scsi_cmnd *scmd)
 		scmd->result = DID_NO_CONNECT << 16;
 		scsi_done(scmd);
 		r = SUCCESS;
+		goto out;
+	}
+
+	r = mpt3sas_bc_mpt_dev_reset_action(ioc, scmd);
+	if (r != -1) {
+		sdev_printk(KERN_NOTICE, scmd->device,
+		    "bc-mpt: force device reset %s for injected command\n",
+		    r == SUCCESS ? "SUCCESS" : "FAILED");
 		goto out;
 	}
 
@@ -3469,6 +3736,13 @@ scsih_target_reset(struct scsi_cmnd *scmd)
 		scmd->result = DID_NO_CONNECT << 16;
 		scsi_done(scmd);
 		r = SUCCESS;
+		goto out;
+	}
+
+	r = mpt3sas_bc_mpt_target_reset_action(ioc, scmd);
+	if (r != -1) {
+		starget_printk(KERN_NOTICE, starget,
+		    "bc-mpt: force target reset SUCCESS for injected command\n");
 		goto out;
 	}
 
@@ -5127,6 +5401,7 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 	struct _raid_device *raid_device;
 	struct request *rq = scsi_cmd_to_rq(scmd);
 	int class;
+	int inject_rc;
 	Mpi25SCSIIORequest_t *mpi_request;
 	struct _pcie_device *pcie_device = NULL;
 	u32 mpi_control;
@@ -5186,6 +5461,10 @@ scsih_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
 		/* device busy with task management */
 		return SCSI_MLQUEUE_DEVICE_BUSY;
 	}
+
+	inject_rc = mpt3sas_bc_mpt_qcmd_inject(ioc, scmd);
+	if (inject_rc >= 0)
+		return inject_rc;
 
 	/*
 	 * Bug work around for firmware SATL handling.  The loop

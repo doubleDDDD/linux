@@ -1362,6 +1362,9 @@ struct MPT3SAS_ADAPTER {
 	u16		broadcast_aen_pending;
 	u8		shost_recovery;
 	u8		got_task_abort_from_ioctl;
+	u8		bc_mpt_fault_stage;
+	int		bc_mpt_tur_budget_left;
+	struct scsi_cmnd	*bc_mpt_held_scmd;
 
 	struct mutex	reset_in_progress_mutex;
 	struct mutex    hostdiag_unlock_mutex;
