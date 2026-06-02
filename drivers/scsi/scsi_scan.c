@@ -413,6 +413,9 @@ static void scsi_target_destroy(struct scsi_target *starget)
 	if (shost->hostt->target_destroy)
 		shost->hostt->target_destroy(starget);
 	list_del_init(&starget->siblings);
+	list_del_init(&starget->same_channel_siblings);
+	if (starget->schannel && starget->schannel->total_stargets)
+		starget->schannel->total_stargets--;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 	put_device(dev);
 }
