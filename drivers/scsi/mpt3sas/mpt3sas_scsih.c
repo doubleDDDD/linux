@@ -375,7 +375,10 @@ static int mpt3sas_bc_mpt_dev_reset_action(struct MPT3SAS_ADAPTER *ioc,
 
 	spin_lock_irqsave(ioc->shost->host_lock, flags);
 	if (ioc->bc_mpt_held_scmd == scmd &&
-	    ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
+	    ((bc_mpt_fault_mode == BC_MPT_FAULT_P2 &&
+	      (ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT ||
+	       ioc->bc_mpt_fault_stage == BC_MPT_STAGE_POST_TRESET_VERIFY)) ||
+	     ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT)) {
 		switch (bc_mpt_fault_mode) {
 		case BC_MPT_FAULT_P2:
 		case BC_MPT_FAULT_P3:
@@ -411,6 +414,11 @@ static int mpt3sas_bc_mpt_target_reset_action(struct MPT3SAS_ADAPTER *ioc,
 			ioc->bc_mpt_held_scmd = NULL;
 			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_POST_TRESET_VERIFY;
 			ioc->bc_mpt_tur_budget_left = bc_mpt_tur_fail_budget;
+			action = SUCCESS;
+		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P2 &&
+			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_POST_TRESET_VERIFY) {
+			ioc->bc_mpt_held_scmd = NULL;
+			ioc->bc_mpt_fault_stage = BC_MPT_STAGE_POST_TRESET_VERIFY;
 			action = SUCCESS;
 		} else if (bc_mpt_fault_mode == BC_MPT_FAULT_P3 &&
 			   ioc->bc_mpt_fault_stage == BC_MPT_STAGE_PRE_TIMEOUT) {
