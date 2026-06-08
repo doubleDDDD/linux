@@ -7221,6 +7221,39 @@ static void scsi_debug_stop_all_queued(struct scsi_device *sdp)
 				scsi_debug_stop_all_queued_iter, sdp);
 }
 
+struct sdebug_offline_ctx {
+	struct scsi_device *sdp;
+	bool ok;
+};
+
+static bool scsi_debug_offline_iter(struct request *rq, void *data)
+{
+	struct sdebug_offline_ctx *ctx = data;
+	struct scsi_cmnd *scmd = blk_mq_rq_to_pdu(rq);
+
+	if (scmd->device != ctx->sdp)
+		return true;
+
+	if (!scsi_debug_abort_cmnd(scmd))
+		ctx->ok = false;
+
+	return true;
+}
+
+static int scsi_debug_offline_handler(struct scsi_device *sdp)
+{
+	struct sdebug_offline_ctx ctx = {
+		.sdp = sdp,
+		.ok = true,
+	};
+
+	blk_mq_tagset_busy_iter(&sdp->host->tag_set,
+				scsi_debug_offline_iter, &ctx);
+	BUG_ON(!ctx.ok);
+
+	return SUCCESS;
+}
+
 static int sdebug_fail_lun_reset(struct scsi_cmnd *cmnd)
 {
 	struct scsi_device *sdp = cmnd->device;
@@ -10011,6 +10044,7 @@ static const struct scsi_host_template sdebug_driver_template = {
 	.eh_target_reset_handler = scsi_debug_target_reset,
 	.eh_bus_reset_handler = scsi_debug_bus_reset,
 	.eh_host_reset_handler = scsi_debug_host_reset,
+	.eh_offline_handler =	scsi_debug_offline_handler,
 	.can_queue =		SDEBUG_CANQUEUE_DEFAULT,
 	.this_id =		7,
 	.sg_tablesize =		SG_MAX_SEGMENTS,
