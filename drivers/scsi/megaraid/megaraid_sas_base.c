@@ -1936,9 +1936,11 @@ bool megasas_bc_mega_target_reset_should_succeed(
 
 	spin_lock_irqsave(instance->host->host_lock, flags);
 	if (instance->bc_mega_held_scmd == scmd &&
-		instance->bc_mega_fault_stage == BC_MEGA_STAGE_PRE_TIMEOUT &&
-		(bc_mega_fault_mode == BC_MEGA_FAULT_P2 ||
-		 bc_mega_fault_mode == BC_MEGA_FAULT_P3))
+		((bc_mega_fault_mode == BC_MEGA_FAULT_P2 &&
+		  (instance->bc_mega_fault_stage == BC_MEGA_STAGE_PRE_TIMEOUT ||
+		   instance->bc_mega_fault_stage == BC_MEGA_STAGE_POST_TRESET_VERIFY)) ||
+		 (bc_mega_fault_mode == BC_MEGA_FAULT_P3 &&
+		  instance->bc_mega_fault_stage == BC_MEGA_STAGE_PRE_TIMEOUT)))
 		succeed = true;
 	spin_unlock_irqrestore(instance->host->host_lock, flags);
 
