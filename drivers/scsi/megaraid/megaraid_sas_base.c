@@ -3727,6 +3727,12 @@ static struct attribute *megaraid_host_attrs[] = {
 
 ATTRIBUTE_GROUPS(megaraid_host);
 
+static int megasas_offline_handler(struct scsi_device *sdev)
+{
+	/* TODO */
+	return 0;
+}
+
 /*
  * Scsi host template for megaraid_sas driver
  */
@@ -3742,6 +3748,7 @@ static const struct scsi_host_template megasas_template = {
 	.eh_target_reset_handler = megasas_reset_target,
 	.eh_abort_handler = megasas_task_abort,
 	.eh_host_reset_handler = megasas_reset_bus_host,
+	.eh_offline_handler = megasas_offline_handler,
 	.eh_timed_out = megasas_reset_timer,
 	.shost_groups = megaraid_host_groups,
 	.bios_param = megasas_bios_param,

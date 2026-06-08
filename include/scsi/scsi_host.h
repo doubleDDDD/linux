@@ -155,6 +155,8 @@ struct scsi_host_template {
 	int (* eh_target_reset_handler)(struct scsi_cmnd *);
 	int (* eh_bus_reset_handler)(struct scsi_cmnd *);
 	int (* eh_host_reset_handler)(struct scsi_cmnd *);
+	/* new offline handler */
+	int (*eh_offline_handler)(struct scsi_device *sdev);
 
 	/*
 	 * Before the mid layer attempts to scan for a new device where none

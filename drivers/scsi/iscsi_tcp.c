@@ -1025,6 +1025,12 @@ static int iscsi_sw_tcp_sdev_configure(struct scsi_device *sdev,
 	return 0;
 }
 
+static int iscsi_offline_handler(struct scsi_device *sdev)
+{
+	/* TODO */
+	return 0;
+}
+
 static const struct scsi_host_template iscsi_sw_tcp_sht = {
 	.module			= THIS_MODULE,
 	.name			= "iSCSI Initiator over TCP/IP",
@@ -1038,6 +1044,7 @@ static const struct scsi_host_template iscsi_sw_tcp_sht = {
 	.eh_abort_handler       = iscsi_eh_abort,
 	.eh_device_reset_handler= iscsi_eh_device_reset,
 	.eh_target_reset_handler = iscsi_eh_recover_target,
+	.eh_offline_handler 	=  iscsi_offline_handler,
 	.dma_boundary		= PAGE_SIZE - 1,
 	.sdev_configure		= iscsi_sw_tcp_sdev_configure,
 	.proc_name		= "iscsi_tcp",

@@ -1523,8 +1523,20 @@ static void scsi_eh_recover_shost_state(struct Scsi_Host *shost)
 	spin_unlock_irqrestore(shost->host_lock, flags);
 }
 
+static void scsi_eh_llld_offline_ok(struct scsi_device *sdev)
+{
+	const struct scsi_host_template *hostt = sdev->host->hostt;
+
+	BUG_ON(!hostt->eh_offline_handler);
+	if (list_empty(&sdev->dev_eh_cmd_q))
+		return;
+	hostt->eh_offline_handler(sdev);
+}
+
 static void scsi_eh_offline_sdev(struct scsi_device *sdev, bool need_run_hw_queue)
 {
+	scsi_eh_llld_offline_ok(sdev);
+
 	mutex_lock(&sdev->state_mutex);
 	scsi_device_set_state(sdev, SDEV_OFFLINE);
 	mutex_unlock(&sdev->state_mutex);

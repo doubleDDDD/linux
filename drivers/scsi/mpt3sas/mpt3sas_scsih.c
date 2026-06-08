@@ -12213,6 +12213,12 @@ static void scsih_map_queues(struct Scsi_Host *shost)
 	}
 }
 
+static int scsih_offline_handler(struct scsi_device *sdev)
+{
+	/* TODO */
+	return 0;
+}
+
 /* shost template for SAS 2.0 HBA devices */
 static const struct scsi_host_template mpt2sas_driver_template = {
 	.module				= THIS_MODULE,
@@ -12269,6 +12275,7 @@ static const struct scsi_host_template mpt3sas_driver_template = {
 	.eh_device_reset_handler	= scsih_dev_reset,
 	.eh_target_reset_handler	= scsih_target_reset,
 	.eh_host_reset_handler		= scsih_host_reset,
+	.eh_offline_handler		= scsih_offline_handler,
 	.bios_param			= scsih_bios_param,
 	.can_queue			= 1,
 	.this_id			= -1,
