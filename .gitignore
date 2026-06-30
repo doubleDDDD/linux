@@ -172,3 +172,4 @@ sphinx_*/
 /rust-project.json
 
 bc_eh_test/
+numa_perf
